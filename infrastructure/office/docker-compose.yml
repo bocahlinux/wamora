@@ -1,0 +1,42 @@
+# Office Server — see docs/13-FINAL-DEPLOYMENT-TOPOLOGY.md
+#
+# HARD RULE: this project MUST NOT define a PostgreSQL service here
+# (docs/CLAUDE.md rule #1, docs/13-FINAL-DEPLOYMENT-TOPOLOGY.md).
+# The backend connects to the EXISTING PostgreSQL via environment
+# variables in .env (DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD).
+
+services:
+  backend:
+    build:
+      context: ../../backend
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  celery-worker:
+    build:
+      context: ../../backend
+    command: celery -A config worker -l info
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  celery-beat:
+    build:
+      context: ../../backend
+    command: celery -A config beat -l info
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped

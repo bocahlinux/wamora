@@ -1,0 +1,38 @@
+.wa-topbar {
+  height: var(--topbar-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--border-default);
+  background: var(--surface-default);
+  flex-shrink: 0;
+}
+
+.wa-topbar__left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.wa-topbar__title {
+  font-size: var(--font-size-h4);
+  font-weight: var(--font-weight-h4);
+  color: var(--text-primary);
+}
+
+.wa-topbar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.wa-topbar__menu-toggle {
+  display: none;
+}
+
+@media (max-width: 1023px) {
+  .wa-topbar__menu-toggle {
+    display: inline-flex;
+  }
+}

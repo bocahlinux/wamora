@@ -1,0 +1,18 @@
+.wa-loading-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-body-small);
+  padding: var(--space-4);
+}
+
+.wa-loading-state__spinner {
+  animation: wa-spin 900ms linear infinite;
+}
+
+@keyframes wa-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

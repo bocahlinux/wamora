@@ -1,0 +1,149 @@
+/* WAMORA design tokens — values taken directly from
+   wamora-design-assets/docs/WAMORA-FRONTEND-DESIGN-SPEC.md Sections 4/5.
+   Do not use raw color/spacing values in components; reference these
+   custom properties instead (spec Section 4, "Important consistency
+   rule"). */
+
+:root {
+  color-scheme: light;
+
+  /* Brand */
+  --color-primary-400: #34d399;
+  --color-primary-500: #10b981;
+  --color-primary-600: #059669;
+  --color-blue-400: #60a5fa;
+  --color-blue-500: #2563eb;
+  --color-blue-600: #3b82f6;
+
+  /* Semantic */
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  --color-info: #3b82f6;
+  --color-offline: #94a3b8;
+
+  /* Light theme neutrals (default) */
+  --color-bg: #f8fafc;
+  --color-surface: #ffffff;
+  --color-surface-alt: #f1f5f9;
+  --color-border: #e2e8f0;
+  --color-text-primary: #111827;
+  --color-text-secondary: #475569;
+  --color-text-muted: #64748b;
+
+  /* Derived semantic roles (spec Section 4's semantic-token list) */
+  --color-primary: var(--color-primary-500);
+  --color-primary-hover: var(--color-primary-600);
+  --surface-default: var(--color-surface);
+  --surface-raised: var(--color-surface);
+  --surface-alt: var(--color-surface-alt);
+  --text-primary: var(--color-text-primary);
+  --text-secondary: var(--color-text-secondary);
+  --text-muted: var(--color-text-muted);
+  --border-default: var(--color-border);
+  --color-focus-ring: var(--color-blue-500);
+
+  /* Typography — Section 5 */
+  --font-family-base: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-size-h1: 32px;
+  --line-height-h1: 40px;
+  --font-weight-h1: 700;
+  --font-size-h2: 24px;
+  --line-height-h2: 32px;
+  --font-weight-h2: 600;
+  --font-size-h3: 20px;
+  --line-height-h3: 28px;
+  --font-weight-h3: 600;
+  --font-size-h4: 16px;
+  --line-height-h4: 24px;
+  --font-weight-h4: 500;
+  --font-size-body: 14px;
+  --line-height-body: 20px;
+  --font-weight-body: 400;
+  --font-size-body-small: 12px;
+  --line-height-body-small: 16px;
+  --font-size-caption: 12px;
+  --line-height-caption: 16px;
+  --font-size-button: 14px;
+  --line-height-button: 20px;
+  --font-weight-button: 500;
+
+  /* Spacing — Section 7 (8px baseline; page padding/card gap/section
+     separation taken directly from the spec's stated pixel values) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --page-padding: 20px;
+  --card-gap: 16px;
+  --section-gap: 24px;
+  --sidebar-width: 252px;
+  --sidebar-width-collapsed: 72px;
+  --topbar-height: 60px;
+
+  /* Radius / shadow / icons — not given exact px values by the spec;
+     chosen to match the reference boards' visibly rounded, low-shadow
+     "calm operational" style (spec Section 2 "Brand personality":
+     avoid excessive rounding/glassmorphism) rather than invented
+     arbitrarily per component. */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --icon-size-sm: 16px;
+  --icon-size-md: 20px;
+  --icon-size-lg: 24px;
+
+  /* Motion — Section 15 */
+  --transition-fast: 150ms ease;
+  --transition-panel: 240ms ease;
+
+  /* Breakpoints (referenced in comments/JS; CSS custom properties
+     cannot be used inside @media queries, so these are also duplicated
+     as literals at each usage site — kept here as the documented
+     source of truth) */
+  --breakpoint-mobile: 640px;
+  --breakpoint-tablet: 1024px;
+}
+
+/* Dark theme neutrals — spec Section 4's dark table, applied via
+   prefers-color-scheme by default and overridable with
+   [data-theme="dark"]/[data-theme="light"] (theme toggle — Section 13
+   of the FRONTEND-DESIGN-SPEC, ThemeProvider below). Semantic brand/
+   status colors are NOT redefined here on purpose (spec Section 13:
+   "A light-mode component and its dark-mode equivalent must represent
+   the same semantic state... Only luminance/contrast should change
+   where required" — success/warning/error/info/primary stay the same
+   hex in both themes). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --color-bg: #0f172a;
+    --color-surface: #1e293b;
+    --color-surface-alt: #334155;
+    --color-border: #475569;
+    --color-text-primary: #f8fafc;
+    --color-text-secondary: #cbd5e1;
+    --color-text-muted: #94a3b8;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --color-bg: #0f172a;
+  --color-surface: #1e293b;
+  --color-surface-alt: #334155;
+  --color-border: #475569;
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #cbd5e1;
+  --color-text-muted: #94a3b8;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+}

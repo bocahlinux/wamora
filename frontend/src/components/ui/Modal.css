@@ -1,0 +1,43 @@
+.wa-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  z-index: 50;
+}
+
+.wa-modal {
+  width: 100%;
+  max-width: 420px;
+  max-height: calc(100vh - var(--space-8));
+  overflow-y: auto;
+  background: var(--surface-default);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.wa-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.wa-modal__title {
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-h3);
+  color: var(--text-primary);
+}
+
+.wa-modal__body {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}

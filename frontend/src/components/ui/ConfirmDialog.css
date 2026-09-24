@@ -1,0 +1,10 @@
+.wa-confirm-dialog__description {
+  font-size: var(--font-size-body);
+  color: var(--text-secondary);
+}
+
+.wa-confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}

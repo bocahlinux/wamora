@@ -1,0 +1,29 @@
+# Environment files — never commit real secrets
+.env
+*/.env
+**/.env
+*.env
+.env.*
+!**/.env.example
+
+# Node
+node_modules/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+db.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / local tooling
+.vscode/
+.idea/
+.pytest_cache/
+.coverage
+*.sqlite3-journal

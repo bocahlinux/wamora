@@ -1,0 +1,214 @@
+import { Activity, Database, MessageSquare, Server, ShieldCheck, Smartphone, Webhook, Wifi } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+
+import { Card } from '../components/ui/Card';
+import { EmptyState } from '../components/ui/EmptyState';
+import { ErrorState } from '../components/ui/ErrorState';
+import { LoadingState } from '../components/ui/LoadingState';
+import { PageHeader } from '../components/ui/PageHeader';
+import { mapActivityResult, StatusBadge } from '../components/ui/StatusBadge';
+import { getBffHealth } from '../lib/bffApi';
+import type { ActivityItem, DashboardActivity, DashboardMessages } from '../lib/djangoApi';
+import { getBackendHealth, getDashboardActivity, getDashboardMessages, getDatabaseHealth } from '../lib/djangoApi';
+import { useApiQuery } from '../lib/useApiQuery';
+import './DashboardPage.css';
+
+// Row 2's activity feed is kept short by design (a dashboard summary, not
+// a full history) — this is a display choice, not a backend limitation;
+// the endpoint itself supports a larger ?limit= if a future page needs it.
+const ACTIVITY_FEED_LIMIT = 8;
+
+const ACTIVITY_TYPE_ICON: Record<ActivityItem['type'], LucideIcon> = {
+  audit: ShieldCheck,
+  webhook: Webhook,
+};
+
+type IconTint = 'primary' | 'blue' | 'blue-deep';
+
+interface HealthCardProps {
+  icon: LucideIcon;
+  tint: IconTint;
+  title: string;
+  query: ReturnType<typeof useApiQuery<{ ok: boolean; detail: string }>>;
+}
+
+// Card layout (icon badge left; bold title + inline status badge; detail
+// below) matches wamora-design-assets/assets/reference/wamora-frontend-reference.png's
+// "Dashboard (Light/Dark Mode)" row 1 cards — each service's icon badge
+// uses a distinct tint from the approved primary/blue palette (design
+// spec Section 4), not one flat neutral gray for all three.
+function HealthCard({ icon: Icon, tint, title, query }: HealthCardProps) {
+  return (
+    <Card className="wa-health-card">
+      <div className={`wa-health-card__icon wa-health-card__icon--${tint}`}>
+        <Icon size={20} strokeWidth={1.75} aria-hidden="true" />
+      </div>
+      <div className="wa-health-card__body">
+        <div className="wa-health-card__title-row">
+          <p className="wa-health-card__title">{title}</p>
+          {query.status === 'loading' ? null : query.status === 'error' ? (
+            <StatusBadge status="error" label="Unreachable" />
+          ) : (
+            <StatusBadge status={query.data.ok ? 'healthy' : 'error'} label={query.data.ok ? 'Healthy' : 'Degraded'} />
+          )}
+        </div>
+        {query.status === 'loading' ? (
+          <LoadingState label="Checking…" />
+        ) : (
+          <p className="wa-health-card__detail">{query.status === 'error' ? 'Could not reach this service.' : query.data.detail}</p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+// Row 2, "messages today / message volume" (design spec Section 10).
+// messages_today and every trend bucket come straight from GET
+// /api/dashboard/messages/ — see docs/generated/PHASE-8-DASHBOARD-BACKEND-FOUNDATION-REPORT.md
+// Section 4 for the exact contract. "Today" is the UTC calendar day
+// (this project's only configured timezone — TIME_ZONE='UTC' in
+// config/settings.py, also the convention docs/generated/PHASE-5-CELERY-REDIS.md
+// already established for Celery to avoid a second time source), labeled
+// explicitly below so it's never mistaken for the viewer's local day.
+function MessagesCard({ query }: { query: ReturnType<typeof useApiQuery<DashboardMessages>> }) {
+  return (
+    <Card className="wa-metric-card">
+      <div className="wa-health-card__icon wa-health-card__icon--primary">
+        <MessageSquare size={20} strokeWidth={1.75} aria-hidden="true" />
+      </div>
+      <div className="wa-metric-card__body">
+        <p className="wa-health-card__title">Messages Today</p>
+        {query.status === 'loading' ? (
+          <LoadingState label="Loading messages…" />
+        ) : query.status === 'error' ? (
+          <ErrorState error={query.error} onRetry={query.refetch} />
+        ) : (
+          <>
+            <p className="wa-metric-card__count">{query.data.messages_today}</p>
+            <div className="wa-metric-card__chart" role="img" aria-label="Messages per hour today, UTC">
+              {query.data.trend.map((bucket) => {
+                const max = Math.max(1, ...query.data.trend.map((b) => b.count));
+                const hourLabel = new Date(bucket.hour).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
+                return (
+                  <div
+                    key={bucket.hour}
+                    className="wa-metric-card__bar"
+                    style={{ height: `${(bucket.count / max) * 100}%` }}
+                    title={`${hourLabel} UTC — ${bucket.count} message${bucket.count === 1 ? '' : 's'}`}
+                  />
+                );
+              })}
+            </div>
+            <p className="wa-health-card__detail">Hourly trend (UTC)</p>
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+// Row 2, "system activity feed" — merges AuditLog + WebhookEvent via GET
+// /api/dashboard/activity/. Presentation (icon/status tone) is derived
+// deterministically from the actual `type`/`result` the backend reports
+// (StatusBadge.mapActivityResult); action/target are shown as the raw
+// backend strings rather than an invented human-readable sentence.
+function ActivityCard({ query }: { query: ReturnType<typeof useApiQuery<DashboardActivity>> }) {
+  return (
+    <Card className="wa-metric-card wa-metric-card--activity">
+      <div className="wa-health-card__icon wa-health-card__icon--blue">
+        <Activity size={20} strokeWidth={1.75} aria-hidden="true" />
+      </div>
+      <div className="wa-metric-card__body">
+        <p className="wa-health-card__title">Recent Activity</p>
+        {query.status === 'loading' ? (
+          <LoadingState label="Loading activity…" />
+        ) : query.status === 'error' ? (
+          <ErrorState error={query.error} onRetry={query.refetch} />
+        ) : query.data.results.length === 0 ? (
+          <EmptyState icon={Activity} title="No recent activity" description="Nothing has happened yet." />
+        ) : (
+          <ul className="wa-activity-list">
+            {query.data.results.map((item) => {
+              const TypeIcon = ACTIVITY_TYPE_ICON[item.type];
+              return (
+                <li key={item.id} className="wa-activity-list__item">
+                  <TypeIcon size={16} strokeWidth={1.75} aria-hidden="true" className="wa-activity-list__icon" />
+                  <div className="wa-activity-list__body">
+                    <p className="wa-activity-list__action">{item.action}</p>
+                    <p className="wa-activity-list__target">{item.target || '—'}</p>
+                  </div>
+                  <StatusBadge status={mapActivityResult(item.result)} label={item.result} />
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+// Dashboard structure follows wamora-design-assets design spec Section 10
+// ("Row 1 — system health", "Row 2 — sessions + activity"). The spec's
+// Row 1 reference board also shows a Redis card — omitted because no
+// Redis health endpoint exists anywhere in the backend (checked
+// apps/core/urls.py directly); showing "Healthy" for a check that was
+// never made would be exactly the "fake successful API behavior" this
+// project's phases forbid. Row 2's "WhatsApp sessions summary" is left as
+// an explicit placeholder for the same reason: the Phase 8 data/UI audit
+// found WahaSession.status is not a reliable live source and true
+// multi-session summary needs BFF work the BFF doesn't have yet
+// (docs/generated/PHASE-8-DASHBOARD-DATA-UI-AUDIT-REPORT.md) — this is a
+// remaining, documented gap, not a silent omission.
+export function DashboardPage() {
+  const wahaQuery = useApiQuery(async () => {
+    const result = await getBffHealth();
+    if (!result.ok) return result;
+    return { ok: true, data: { ok: result.data.waha.reachable, detail: result.data.waha.reachable ? 'Connected' : 'Not reachable' } };
+  }, []);
+
+  const backendQuery = useApiQuery(async () => {
+    const result = await getBackendHealth();
+    if (!result.ok) return result;
+    return { ok: true, data: { ok: result.data.status === 'ok', detail: 'Running' } };
+  }, []);
+
+  const databaseQuery = useApiQuery(async () => {
+    const result = await getDatabaseHealth();
+    if (!result.ok) return result;
+    return { ok: true, data: { ok: result.data.status === 'ok', detail: 'Connected' } };
+  }, []);
+
+  const messagesQuery = useApiQuery(() => getDashboardMessages(), []);
+  const activityQuery = useApiQuery(() => getDashboardActivity(ACTIVITY_FEED_LIMIT), []);
+
+  return (
+    <div>
+      <PageHeader title="Dashboard" description="Overview of your WhatsApp operations and system status" />
+
+      <section className="wa-dashboard__health-row" aria-label="System health">
+        <HealthCard icon={Wifi} tint="primary" title="WAHA" query={wahaQuery} />
+        <HealthCard icon={Server} tint="blue" title="Backend (Django)" query={backendQuery} />
+        <HealthCard icon={Database} tint="blue-deep" title="PostgreSQL" query={databaseQuery} />
+      </section>
+
+      <section className="wa-dashboard__row2" aria-label="Messages, activity and sessions">
+        <MessagesCard query={messagesQuery} />
+        <ActivityCard query={activityQuery} />
+        <Card className="wa-metric-card">
+          <div className="wa-health-card__icon wa-health-card__icon--blue-deep">
+            <Smartphone size={20} strokeWidth={1.75} aria-hidden="true" />
+          </div>
+          <div className="wa-metric-card__body">
+            <p className="wa-health-card__title">WhatsApp Sessions</p>
+            <EmptyState
+              icon={Smartphone}
+              title="Not available yet"
+              description="A multi-session summary needs BFF work beyond this phase's scope — see the Phase 8 dashboard audit."
+            />
+          </div>
+        </Card>
+      </section>
+    </div>
+  );
+}

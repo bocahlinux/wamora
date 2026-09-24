@@ -1,0 +1,108 @@
+.wa-session-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  max-width: 640px;
+}
+
+.wa-session-card__icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+  color: var(--color-primary-600);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.wa-session-card__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.wa-session-card__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.wa-session-card__name {
+  font-size: var(--font-size-h4);
+  font-weight: var(--font-weight-h4);
+  color: var(--text-primary);
+}
+
+.wa-session-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.wa-session-feedback {
+  font-size: var(--font-size-body-small);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+}
+
+.wa-session-feedback--success {
+  background: color-mix(in srgb, var(--color-success) 12%, transparent);
+  color: var(--color-success);
+}
+
+.wa-session-feedback--syncing {
+  color: var(--text-muted);
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.wa-session-feedback--unknown {
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--text-secondary);
+}
+
+.wa-pairing-modal__tabs {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.wa-pairing-modal__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.wa-pairing-modal__qr-image {
+  width: 100%;
+  max-width: 240px;
+  align-self: center;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+}
+
+.wa-pairing-modal__raw {
+  font-size: var(--font-size-caption);
+  color: var(--text-muted);
+  background: var(--surface-alt);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wa-pairing-modal__code {
+  font-size: var(--font-size-h2);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-primary);
+  text-align: center;
+  padding: var(--space-3);
+  background: var(--surface-alt);
+  border-radius: var(--radius-md);
+}

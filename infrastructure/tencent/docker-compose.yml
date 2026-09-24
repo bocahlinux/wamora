@@ -1,0 +1,41 @@
+# Tencent VPS — see docs/13-FINAL-DEPLOYMENT-TOPOLOGY.md
+# Flow: Browser -> Frontend -> BFF -> WAHA -> WhatsApp
+# Port access must be restricted at the network layer (LAN/NetBird),
+# not by this file — see docs/06-SECURITY.md.
+
+services:
+  frontend:
+    build:
+      context: ../../frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - bff
+    restart: unless-stopped
+
+  bff:
+    build:
+      context: ../../bff
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      - waha
+    restart: unless-stopped
+
+  waha:
+    image: devlikeapro/waha:gows
+    env_file:
+      - .env
+    volumes:
+      - waha_sessions:/app/.sessions
+      - waha_media:/app/.media
+    restart: unless-stopped
+    # No published port: the BFF reaches WAHA over the internal Docker
+    # network only (docs/06-SECURITY.md: "WAHA port should not be
+    # unnecessarily public").
+
+volumes:
+  waha_sessions:
+  waha_media:
