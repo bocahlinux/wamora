@@ -1,5 +1,15 @@
 # Phase 11 — Blast — Stuck-Recipient Recovery — Implementation Report
 
+> **Phase labeling note (added 2026-09-26):** this report's references
+> below to "Phase 13.A" (including a quoted source-code string literal)
+> and "Phase 13.B work" use informal labels. Those labels are not part of
+> the canonical roadmap's Phase 13 ("Failure/security testing",
+> `docs/15-CODING-PHASES.md`) — they refer to earlier
+> reconciliation-recovery/diagnostics-UI work that is properly a
+> continuation of Phase 4/Phase 9. The quoted `last_error` string is left
+> verbatim since it reflects actual source code text. See
+> `docs/11-DECISIONS-AND-OPEN-QUESTIONS.md` for the recorded decision.
+
 ## 1. Objective
 
 Close the single FAIL from

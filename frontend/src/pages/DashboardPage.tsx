@@ -1,18 +1,74 @@
-import { Activity, Database, MessageSquare, Server, ShieldCheck, Smartphone, Webhook, Wifi, Zap } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Activity, Database, MessageSquare, RefreshCw, Server, ShieldCheck, Smartphone, TriangleAlert, Webhook, Wifi, Zap } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
+import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { LoadingState } from '../components/ui/LoadingState';
 import { PageHeader } from '../components/ui/PageHeader';
-import { mapActivityResult, mapWahaStatus, StatusBadge } from '../components/ui/StatusBadge';
+import { mapActivityResult, mapSyncStatus, mapWahaStatus, StatusBadge } from '../components/ui/StatusBadge';
+import type { ApiError } from '../lib/api';
 import { getBffHealth, getSessionStatus, type SessionStatus } from '../lib/bffApi';
 import { config } from '../lib/config';
-import type { ActivityItem, DashboardActivity, DashboardMessages } from '../lib/djangoApi';
-import { getBackendHealth, getDashboardActivity, getDashboardMessages, getDatabaseHealth, getRedisHealth } from '../lib/djangoApi';
+import type { ActivityItem, DashboardActivity, DashboardMessages, SyncStatus } from '../lib/djangoApi';
+import {
+  getBackendHealth,
+  getDashboardActivity,
+  getDashboardMessages,
+  getDatabaseHealth,
+  getRedisHealth,
+  getSyncStatus,
+  recoverSyncCheckpoint,
+} from '../lib/djangoApi';
 import { useApiQuery } from '../lib/useApiQuery';
+import { useAuth } from '../lib/AuthContext';
 import './DashboardPage.css';
+
+// Recovery scope gate — same EXISTING JWT scope string ("system
+// administration", backend: apps/authn/permissions.py
+// HasSystemAdministrationScope) InboxPage.tsx already gates its own
+// recovery button with. UX courtesy only; the backend remains the
+// authoritative boundary. No new scope introduced.
+const SYSTEM_ADMINISTRATION_SCOPE = 'system administration';
+
+// Sync status card (Phase 9 offline/degraded-mode completion —
+// docs/generated/PHASE-9-OFFLINE-DEGRADED-MODE-COMPLETION-REPORT.md):
+// extends InboxPage.tsx's already-proven getSyncStatus/StatusBadge/
+// possibly_stuck/recovery pattern to the Dashboard. Deliberately a
+// page-local duplicate of Inbox's fetch/poll/recovery logic rather than a
+// shared hook — see the completion report's Step 2 for the reasoning
+// (Inbox's version is entangled with its own connectivity-indicator
+// signal in a way that made a clean, risk-free extraction not worth it
+// for ~25 lines of logic). SYNC_STATUS_POLL_MS is the same literal value
+// as InboxPage.tsx's own (CHAT_LIST_POLL_MS * 4 = 8000 * 4), not
+// re-derived from a Dashboard-local constant that doesn't otherwise
+// exist, so the polling cadence for this data stays identical across
+// both pages.
+const SYNC_STATUS_POLL_MS = 32000;
+
+const SYNC_STATUS_LABEL: Record<SyncStatus['sync_status'], string> = {
+  healthy: 'Synced',
+  running: 'Syncing',
+  stale: 'Sync delayed',
+  failed: 'Sync error',
+  never_synced: 'Not synced',
+};
+
+function describeSyncDetail(status: SyncStatus): string {
+  if (status.sync_status === 'never_synced') return 'No reconciliation run yet.';
+  if (status.seconds_since_last_run !== null) {
+    const minutes = Math.floor(status.seconds_since_last_run / 60);
+    if (minutes < 1) return 'Last run less than a minute ago.';
+    if (minutes < 60) return `Last run ${minutes} minute${minutes === 1 ? '' : 's'} ago.`;
+    const hours = Math.floor(minutes / 60);
+    return `Last run ${hours} hour${hours === 1 ? '' : 's'} ago.`;
+  }
+  if (status.last_run_at) return `Last run at ${new Date(status.last_run_at).toLocaleString()}.`;
+  return 'Waiting for the next reconciliation run.';
+}
 
 // Row 2's activity feed is kept short by design (a dashboard summary, not
 // a full history) — this is a display choice, not a backend limitation;
@@ -189,6 +245,146 @@ function SessionsCard({ sessionName, query }: { sessionName: string; query: Retu
   );
 }
 
+// Row 2, reconciliation sync-status card. Same session-scoped
+// getSyncStatus read, StatusBadge/mapSyncStatus vocabulary, possibly_stuck
+// warning chip and admin-gated manual-recovery action as InboxPage.tsx —
+// see the module-level comment above for why this duplicates rather than
+// shares Inbox's fetch/poll/recovery logic. This says nothing about
+// WhatsApp/BFF connectivity (that's the WhatsApp Session card above); it
+// is purely about reconciliation data freshness, matching Inbox's own
+// "never say offline/disconnected here" discipline (StatusBadge.tsx's
+// mapSyncStatus docstring).
+function SyncStatusCard({ sessionName }: { sessionName: string }) {
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+
+  const fetchSyncStatus = useCallback(async () => {
+    if (!sessionName) return;
+    const result = await getSyncStatus(sessionName);
+    if (result.ok) {
+      setSyncStatus(result.data);
+      return;
+    }
+    if (result.error.kind === 'not_found') {
+      // Django has never heard of this session name at all — treated
+      // identically to a known session that hasn't been reconciled yet,
+      // same as InboxPage.tsx's own fetchSyncStatus.
+      setSyncStatus({
+        session: sessionName,
+        sync_status: 'never_synced',
+        checkpoint_status: null,
+        last_run_at: null,
+        seconds_since_last_run: null,
+        checkpoint_updated_at: null,
+        possibly_stuck: false,
+        last_webhook_received_at: null,
+      });
+      return;
+    }
+    // Connectivity-class failure — keep showing the last known sync status
+    // rather than blanking it (same "freeze, don't blank" discipline used
+    // throughout this app). The Dashboard's own health-row cards already
+    // surface backend/BFF unreachability generally; this card doesn't need
+    // a second, duplicate connectivity indicator.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionName]);
+
+  useEffect(() => {
+    setSyncStatus(null);
+    if (!sessionName) return undefined;
+    fetchSyncStatus();
+    const interval = setInterval(fetchSyncStatus, SYNC_STATUS_POLL_MS);
+    return () => clearInterval(interval);
+  }, [sessionName, fetchSyncStatus]);
+
+  const { claims } = useAuth();
+  const canRecover = claims?.scopes.includes(SYSTEM_ADMINISTRATION_SCOPE) ?? false;
+
+  const [recoveryConfirmOpen, setRecoveryConfirmOpen] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryFeedback, setRecoveryFeedback] = useState<
+    { kind: 'success' } | { kind: 'error'; error: ApiError } | null
+  >(null);
+
+  async function handleRecoverConfirmed() {
+    if (!sessionName || recoveryBusy) return;
+    setRecoveryBusy(true);
+    setRecoveryFeedback(null);
+    const result = await recoverSyncCheckpoint(sessionName);
+    setRecoveryBusy(false);
+    setRecoveryConfirmOpen(false);
+    if (!result.ok) {
+      setRecoveryFeedback({ kind: 'error', error: result.error });
+      return;
+    }
+    setRecoveryFeedback({ kind: 'success' });
+    fetchSyncStatus();
+  }
+
+  return (
+    <Card className="wa-metric-card">
+      <div className="wa-health-card__icon wa-health-card__icon--primary">
+        <RefreshCw size={20} strokeWidth={1.75} aria-hidden="true" />
+      </div>
+      <div className="wa-metric-card__body">
+        <div className="wa-health-card__title-row">
+          <p className="wa-health-card__title">Reconciliation Sync</p>
+          {!sessionName ? null : syncStatus ? (
+            <StatusBadge
+              status={mapSyncStatus(syncStatus.sync_status, syncStatus.possibly_stuck)}
+              label={SYNC_STATUS_LABEL[syncStatus.sync_status]}
+            />
+          ) : null}
+        </div>
+        {!sessionName ? (
+          <EmptyState
+            icon={RefreshCw}
+            title="No session configured"
+            description="Set VITE_WAHA_SESSION_NAME to enable sync status."
+          />
+        ) : !syncStatus ? (
+          <LoadingState label="Checking sync status…" />
+        ) : (
+          <>
+            <p className="wa-health-card__detail">{describeSyncDetail(syncStatus)}</p>
+            {syncStatus.possibly_stuck ? (
+              <div className="wa-metric-card__sync-stuck" role="status">
+                <p className="wa-metric-card__sync-stuck-text">
+                  <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+                  Reconciliation may be stuck — running longer than expected.
+                </p>
+                {canRecover ? (
+                  <Button variant="secondary" disabled={recoveryBusy} onClick={() => setRecoveryConfirmOpen(true)}>
+                    Mark reconciliation as failed…
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            {recoveryFeedback?.kind === 'success' ? (
+              <p className="wa-metric-card__sync-recovery-feedback wa-metric-card__sync-recovery-feedback--success" role="status">
+                Reconciliation for {sessionName} was marked as failed. A future run can start cleanly.
+              </p>
+            ) : recoveryFeedback?.kind === 'error' ? (
+              <ErrorState error={recoveryFeedback.error} />
+            ) : null}
+          </>
+        )}
+      </div>
+
+      {sessionName ? (
+        <ConfirmDialog
+          open={recoveryConfirmOpen}
+          title={`Mark reconciliation for ${sessionName} as failed?`}
+          description="Reconciliation is only suspected to be stuck — this is based on how long it has been running, not proof the process has stopped. Confirming will mark the current run as failed so a future reconciliation can start cleanly; it will not start a new run automatically, and this cannot be undone. Only continue if you believe this run is no longer active."
+          confirmLabel="Mark as failed"
+          busy={recoveryBusy}
+          onCancel={() => setRecoveryConfirmOpen(false)}
+          onConfirm={handleRecoverConfirmed}
+        />
+      ) : null}
+    </Card>
+  );
+}
+
 // Dashboard structure follows wamora-design-assets design spec Section 10
 // ("Row 1 — system health", "Row 2 — sessions + activity"). Row 1's
 // Redis card (docs/generated/PHASE9-1C-REDIS-HEALTH-IMPLEMENTATION-REPORT.md,
@@ -250,10 +446,11 @@ export function DashboardPage() {
         <HealthCard icon={Zap} tint="primary" title="Redis" query={redisQuery} />
       </section>
 
-      <section className="wa-dashboard__row2" aria-label="Messages, activity and sessions">
+      <section className="wa-dashboard__row2" aria-label="Messages, activity, sessions and sync status">
         <MessagesCard query={messagesQuery} />
         <ActivityCard query={activityQuery} />
         <SessionsCard sessionName={sessionName} query={sessionQuery} />
+        <SyncStatusCard sessionName={sessionName} />
       </section>
     </div>
   );

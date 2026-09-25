@@ -14,6 +14,27 @@
 11. BFF stack: Node.js + TypeScript, Express.
 12. Blast limits: max 100 recipients/campaign; max 500 recipients/day/session; 60s delay between messages; dispatch must be queued/throttled; admin ("system administration" scope) approval required before dispatch.
 
+## Final — 2026-09-26, phase-labeling correction
+13. The "Phase 13.A"/"Phase 13.B" labels used across ~10 `docs/generated/`
+    reports (manual reconciliation-recovery API + its diagnostics/recovery
+    UI) are **not** official sub-phases of `docs/15-CODING-PHASES.md`'s
+    Phase 13 ("Failure/security testing"). They originated as internal
+    subsection-option numbers ("Section 13, options A and B") in
+    `NEXT-PHASE-RECONCILIATION-RECOVERY-DESIGN-AUDIT-REPORT.md`'s
+    "Proposed State Machine" section and were informally promoted to
+    "Phase" status by a later report's title. In substance this work is a
+    continuation of **Phase 4 (Reconciliation)** and **Phase 9
+    (Offline/degraded mode)**. Decision: relabel in prose going forward as
+    Phase 4/9 work; do **not** invent a new official sub-number (e.g. not
+    "Phase 4.1"/"Phase 9.2") — `docs/15-CODING-PHASES.md`'s 0–14 list is
+    unchanged. The existing informal "9.1A"–"9.1F" convention used
+    elsewhere for earlier Phase 9 connectivity-detection work is a
+    separate, already-established lineage and is not extended to this
+    reconciliation-recovery/diagnostics-UI work. Existing report filenames
+    (`PHASE-13A-...`, `PHASE-13B-...`) are kept as-is for link continuity;
+    each affected report now carries an added clarification note. Full
+    trace: `docs/generated/PHASE-ROADMAP-STATUS-AUDIT-REPORT.md` Section 7.
+
 ## Open
 - exact auth implementation;
 - frontend versions;

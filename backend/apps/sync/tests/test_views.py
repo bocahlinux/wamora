@@ -49,6 +49,17 @@ class SyncStatusViewTests(APITestCase):
         return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
 
     def _user(self, username='operator'):
+        """A user whose issued JWT carries the 'reading' scope, via Group
+        membership — the same mechanism apps.chats.test_views's
+        `_reading_user()` already uses, and the one every real operator
+        already needs for the Inbox (apps.chats) to work at all (Phase 12
+        MUST-FIX #1 — see SyncStatusView's own docstring)."""
+        user = User.objects.create_user(username, password='pw')
+        group, _ = Group.objects.get_or_create(name='reading')
+        user.groups.add(group)
+        return user
+
+    def _no_scope_user(self, username='no-scope-operator'):
         return User.objects.create_user(username, password='pw')
 
     def _make_webhook_event(self, session, received_at, provider_event_id, event_type='message', status_='processed'):
@@ -68,11 +79,16 @@ class SyncStatusViewTests(APITestCase):
         response = self.client.get(self._url())
         self.assertEqual(response.status_code, 401)
 
-    def test_authenticated_request_succeeds_with_no_scope_required(self):
-        # IsAuthenticated-only, matching apps.dashboard's precedent (design
-        # report Section 5) — a plain user with no Group/scope membership
-        # at all must still succeed, unlike apps.chats's HasReadingScope
-        # endpoints.
+    def test_authenticated_without_reading_scope_is_forbidden(self):
+        # Phase 12 (Security hardening) MUST-FIX #1 — this endpoint now
+        # requires the 'reading' scope, exactly like apps.chats's
+        # HasReadingScope endpoints; a user with zero Group/scope
+        # membership must be rejected.
+        user = self._no_scope_user()
+        response = self.client.get(self._url(), **self._auth_header(user))
+        self.assertEqual(response.status_code, 403)
+
+    def test_authenticated_with_reading_scope_succeeds(self):
         user = self._user()
         response = self.client.get(self._url(), **self._auth_header(user))
         self.assertEqual(response.status_code, 200)

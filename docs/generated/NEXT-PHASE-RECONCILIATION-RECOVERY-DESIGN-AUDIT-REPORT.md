@@ -1,5 +1,17 @@
 # Possibly-Stuck Reconciliation Recovery — Design Audit Report
 
+> **Phase labeling note (added 2026-09-26, per
+> `docs/generated/PHASE-ROADMAP-STATUS-AUDIT-REPORT.md`):** this report's
+> Section 13 ("Proposed State Machine") uses "13.A"/"13.B" as its own
+> internal subsection-option labels (option A vs. option B), not as
+> roadmap phase numbers. Later reports informally promoted these into
+> "Phase 13.A"/"Phase 13.B" titles, which collide with — but are not
+> actually part of — the canonical roadmap's Phase 13 ("Failure/security
+> testing", `docs/15-CODING-PHASES.md`). The work this section describes
+> is properly a continuation of Phase 4 ("Reconciliation") and Phase 9
+> ("Offline/degraded mode"). See
+> `docs/11-DECISIONS-AND-OPEN-QUESTIONS.md` for the recorded decision.
+
 **This is a read-only design audit. No source, test, config, Docker,
 Compose, `.env`, migration, or Celery configuration file was modified.
 No container was started, stopped, or restarted. No reconciliation was

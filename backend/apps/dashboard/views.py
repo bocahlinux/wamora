@@ -24,6 +24,7 @@ from django.db.models.functions import TruncHour
 
 from apps.audit.models import AuditLog
 from apps.authn.authentication import JWTAuthentication
+from apps.authn.permissions import HasReadingScope
 from apps.chats.models import Message
 from apps.webhooks.models import WebhookEvent
 
@@ -47,10 +48,24 @@ class MessagesStatsView(APIView):
     Acceptable at this project's current expected scale (a handful of
     WAHA sessions); flagged as a candidate `Index(fields=['timestamp'])`
     if message volume grows, not added speculatively here.
+
+    Auth: Phase 12 (Security hardening) MUST-FIX #1 —
+    docs/generated/PHASE-12-SECURITY-HARDENING-DESIGN-AUDIT-REPORT.md
+    Section 3.2: this previously required only IsAuthenticated, with no
+    scope check — any authenticated user, even one with zero assigned
+    scopes, could read message-volume data. Now gated behind
+    `HasReadingScope`, exactly mirroring `apps.chats.ChatListView`/
+    `ChatMessagesView` (the existing precedent for read-only,
+    conversation-adjacent data). Every normal operator's token already
+    carries the 'reading' scope (Django Group membership named 'reading',
+    apps.authn.jwt_utils.compute_scopes()) because the Inbox
+    (frontend/src/pages/InboxPage.tsx) already depends on the exact same
+    scope for apps.chats — this does not newly require anything a working
+    Inbox user doesn't already have.
     """
 
     authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasReadingScope]
 
     def get(self, request):
         now = timezone.now()
@@ -94,10 +109,17 @@ class ActivityFeedView(APIView):
     Acceptable at current expected volume; flagged as a candidate
     `Index(fields=['received_at'])` if this becomes a hot path, not added
     speculatively here.
+
+    Auth: Phase 12 (Security hardening) MUST-FIX #1 — same fix and
+    reasoning as MessagesStatsView above, arguably sharper here since this
+    view's results include every AuditLog row (actor/action/target/result
+    of every session-control/blast-approval/recovery action in the
+    system) — now gated behind HasReadingScope rather than bare
+    IsAuthenticated.
     """
 
     authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasReadingScope]
 
     def get(self, request):
         limit = self._parse_limit(request.query_params.get('limit'))

@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Group, User
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -25,13 +25,26 @@ ACTIVITY_URL = '/api/dashboard/activity/'
 )
 class DashboardEndpointsTestCase(APITestCase):
     def setUp(self):
+        # Phase 12 (Security hardening) MUST-FIX #1 — both endpoints in
+        # this module now require the 'reading' scope (HasReadingScope),
+        # so the default test user here carries it via Group membership,
+        # the same mechanism apps.chats.test_views/apps.sync.tests.test_views
+        # already use for their own '_reading_user()' helpers. A dedicated
+        # no-scope user is added below for the negative case.
         self.user = User.objects.create_user('operator', password='pw')
+        group, _ = Group.objects.get_or_create(name='reading')
+        self.user.groups.add(group)
         self.token = issue_access_token(self.user)['access_token']
         self.session = WahaSession.objects.create(name='primary')
         self.chat = Chat.objects.create(session=self.session, provider_chat_id='62811@c.us')
 
     def _auth_header(self):
         return {'HTTP_AUTHORIZATION': f'Bearer {self.token}'}
+
+    def _no_scope_auth_header(self):
+        no_scope_user = User.objects.create_user('no-scope-operator', password='pw')
+        token = issue_access_token(no_scope_user)['access_token']
+        return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
 
     def _make_message(self, timestamp, provider_message_id):
         return Message.objects.create(
@@ -58,6 +71,11 @@ class MessagesStatsViewTests(DashboardEndpointsTestCase):
     def test_unauthenticated_request_is_rejected(self):
         response = self.client.get(MESSAGES_URL)
         self.assertEqual(response.status_code, 401)
+
+    def test_authenticated_without_reading_scope_is_forbidden(self):
+        # Phase 12 (Security hardening) MUST-FIX #1.
+        response = self.client.get(MESSAGES_URL, **self._no_scope_auth_header())
+        self.assertEqual(response.status_code, 403)
 
     def test_empty_dataset_returns_zeroed_trend(self):
         response = self.client.get(MESSAGES_URL, **self._auth_header())
@@ -102,6 +120,11 @@ class ActivityFeedViewTests(DashboardEndpointsTestCase):
     def test_unauthenticated_request_is_rejected(self):
         response = self.client.get(ACTIVITY_URL)
         self.assertEqual(response.status_code, 401)
+
+    def test_authenticated_without_reading_scope_is_forbidden(self):
+        # Phase 12 (Security hardening) MUST-FIX #1.
+        response = self.client.get(ACTIVITY_URL, **self._no_scope_auth_header())
+        self.assertEqual(response.status_code, 403)
 
     def test_empty_dataset_returns_empty_results(self):
         response = self.client.get(ACTIVITY_URL, **self._auth_header())

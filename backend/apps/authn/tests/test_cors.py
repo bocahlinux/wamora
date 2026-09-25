@@ -1,3 +1,4 @@
+from django.core.cache import cache
 from django.test import override_settings
 from rest_framework.test import APITestCase
 
@@ -17,6 +18,17 @@ class CorsPreflightTests(APITestCase):
     Phase 7 login POST at the CORS preflight stage because Django never
     emitted Access-Control-Allow-Origin. These tests exercise the actual
     preflight the browser sends, not just the POST itself."""
+
+    def setUp(self):
+        # Phase 12 (Security hardening) MUST-FIX #5 — LOGIN_URL now carries
+        # its own strict, IP-keyed 5/minute throttle
+        # (apps/authn/throttling.py) whose cache-backed history persists
+        # for the process lifetime of the test run, shared by test IP
+        # across every test class that calls LOGIN_URL, including this one
+        # and apps/authn/tests/test_views.py — clearing the cache isolates
+        # this class's own real POST (test_actual_login_response_...) from
+        # them.
+        cache.clear()
 
     def test_preflight_for_the_configured_origin_receives_cors_headers(self):
         response = self.client.options(
@@ -69,6 +81,9 @@ class CorsPreflightTests(APITestCase):
 
 @override_settings(CORS_ALLOWED_ORIGINS=[])
 class CorsUnconfiguredTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+
     def test_no_origin_is_allowed_when_unconfigured(self):
         """Fails closed — an empty CORS_ALLOWED_ORIGINS must never behave
         like a wildcard."""

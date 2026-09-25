@@ -1,5 +1,18 @@
 # Phase 13.A — Manual Reconciliation Recovery — Implementation Report
 
+> **Phase labeling note (added 2026-09-26, per
+> `docs/generated/PHASE-ROADMAP-STATUS-AUDIT-REPORT.md`):** despite this
+> report's filename/title using "13.A", this work is NOT part of the
+> canonical roadmap's Phase 13 ("Failure/security testing",
+> `docs/15-CODING-PHASES.md`). It is properly a continuation of Phase 4
+> ("Reconciliation") and Phase 9 ("Offline/degraded mode") — manual
+> recovery of a `SyncCheckpoint` stuck at `RUNNING`. The "13.A" numbering
+> was informal, originating from an internal subsection label ("Section
+> 13, option A") in `NEXT-PHASE-RECONCILIATION-RECOVERY-DESIGN-AUDIT-REPORT.md`,
+> and is retained here only for continuity with existing links — it does
+> not reflect the official roadmap. See
+> `docs/11-DECISIONS-AND-OPEN-QUESTIONS.md` for the recorded decision.
+
 **Conclusion: Complete.** `POST /api/sync/recover/<session_name>/` lets
 an authenticated operator with the `system administration` JWT scope
 manually mark a genuinely `possibly_stuck` `SyncCheckpoint` as `ERROR`,

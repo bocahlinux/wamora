@@ -1,5 +1,13 @@
 # Phase 11 — Blast (Controlled Bulk Send) — Design Audit Report
 
+> **Phase labeling note (added 2026-09-26):** this report's several
+> references below to "Phase 13.A" and "the 13.B audit" use informal
+> labels. Those labels are not part of the canonical roadmap's Phase 13
+> ("Failure/security testing", `docs/15-CODING-PHASES.md`) — they refer
+> to earlier reconciliation-recovery/diagnostics-UI work that is properly
+> a continuation of Phase 4/Phase 9. See
+> `docs/11-DECISIONS-AND-OPEN-QUESTIONS.md` for the recorded decision.
+
 **This is a read-only design audit. No source, migration, Docker,
 Compose, or configuration file was modified. No container was started,
 stopped, or restarted. No write/mutating endpoint was called. The only

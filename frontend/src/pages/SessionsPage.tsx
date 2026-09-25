@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { LogOut, Play, QrCode, RefreshCw, Smartphone, Square } from 'lucide-react';
+import { LogIn, LogOut, Play, QrCode, RefreshCw, Smartphone, Square, WifiOff } from 'lucide-react';
 
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -62,6 +62,21 @@ const ACTION_VERB_ING: Record<SessionLifecycleAction, string> = {
 const POLL_INTERVAL_MS = 1500;
 const POLL_MAX_TICKS = 20; // ~30s ceiling
 
+// Connectivity indicator (Phase 9 offline/degraded-mode completion —
+// docs/generated/PHASE-9-OFFLINE-DEGRADED-MODE-COMPLETION-REPORT.md).
+// Same signal/threshold/philosophy as InboxPage.tsx's Signal A: derived
+// entirely from the existing ApiError.kind taxonomy (lib/api.ts), no new
+// backend endpoint. Kept as a page-local duplicate of Inbox's constant/
+// type/function rather than a shared import — this page's only repeating
+// request loop (the settle-poll below) has different lifecycle mechanics
+// (generation-guarded, self-terminating) than Inbox's plain setInterval
+// loops, so sharing the type/threshold value is safe and simple, but
+// forcing the two request-loop implementations into one shared function
+// would risk changing either page's behavior for a marginal reuse gain.
+const CONNECTIVITY_FAILURE_THRESHOLD = 2;
+
+type ConnectivityIssue = 'unreachable' | 'unauthorized';
+
 // Session Management phase — docs/generated/SESSION-MANAGEMENT-IMPLEMENTATION-REPORT.md.
 // Scope note (unchanged from Phase 7): "session/status presentation" was
 // this page's Phase 7 scope; start/stop/restart/logout/QR/pairing-code
@@ -76,6 +91,34 @@ export function SessionsPage() {
   const [feedback, setFeedback] = useState<ActionFeedback | null>(null);
   const [confirmAction, setConfirmAction] = useState<'stop' | 'logout' | null>(null);
   const [pairingOpen, setPairingOpen] = useState(false);
+
+  // ---- Connectivity indicator ---------------------------------------------
+  // Fed only by the settle-poll below (runTick) — not by the initial
+  // statusQuery load (which already has its own ErrorState + manual retry,
+  // same exclusion InboxPage.tsx makes for its first-load queries) and not
+  // by write actions (start/stop/restart/logout/pairing, which already have
+  // their own ActionFeedback/ErrorState). Previously a transient failure
+  // mid-settle-poll silently ended the sync with no feedback at all — this
+  // is the "zero connectivity-issue handling" gap the roadmap audit found.
+  const [connectivityIssue, setConnectivityIssue] = useState<ConnectivityIssue | null>(null);
+  const connectivityFailureCountRef = useRef(0);
+
+  function reportPollOutcome(result: ApiResult<unknown>) {
+    if (result.ok) {
+      connectivityFailureCountRef.current = 0;
+      setConnectivityIssue(null);
+      return;
+    }
+    if (result.error.kind === 'unauthorized' || result.error.kind === 'forbidden') {
+      connectivityFailureCountRef.current = 0;
+      setConnectivityIssue('unauthorized');
+      return;
+    }
+    connectivityFailureCountRef.current += 1;
+    if (connectivityFailureCountRef.current >= CONNECTIVITY_FAILURE_THRESHOLD) {
+      setConnectivityIssue('unreachable');
+    }
+  }
 
   // Freshest known status since the last mutation, refreshed by
   // startStatusSync() below. Overrides statusQuery's (only-fetched-once)
@@ -115,13 +158,27 @@ export function SessionsPage() {
     getSessionStatus(sessionName).then((result) => {
       if (generation !== pollGenerationRef.current) return; // superseded/cancelled
       if (!result.ok) {
-        // Stop cleanly on a fetch error/timeout — never spin forever on a
-        // failing background check. The last known-good status (if any)
-        // stays displayed rather than being replaced with an alarming
-        // error state for what may just be a transient blip.
-        setIsSyncing(false);
+        // Previously this stopped the settle-poll outright on any single
+        // failure/timeout, with no feedback at all. A transient blip during
+        // a settle-poll is exactly a "degraded connectivity" case, so this
+        // now behaves like a normal unsettled tick: report the outcome
+        // (drives the connectivity banner below) and keep retrying, still
+        // bounded by the existing ticksLeft/POLL_MAX_TICKS ceiling — never
+        // spins forever. The last known-good status (if any) stays
+        // displayed rather than being replaced with an alarming error state
+        // for what may just be a transient blip.
+        reportPollOutcome(result);
+        if (ticksLeft <= 0) {
+          setIsSyncing(false);
+          return;
+        }
+        pollTimeoutRef.current = setTimeout(() => {
+          if (generation !== pollGenerationRef.current) return;
+          runTick(generation, previousStatus, ticksLeft - 1);
+        }, POLL_INTERVAL_MS);
         return;
       }
+      reportPollOutcome(result);
       setLiveStatus(result.data);
       const current = result.data.status;
       const settled = previousStatus !== undefined && current === previousStatus;
@@ -170,6 +227,23 @@ export function SessionsPage() {
   return (
     <div>
       <PageHeader title="Sessions" description="WhatsApp session status and controls" />
+
+      {connectivityIssue ? (
+        <p className="wa-session-connectivity" role="status">
+          {connectivityIssue === 'unauthorized' ? (
+            <>
+              <LogIn size={14} strokeWidth={1.75} aria-hidden="true" />
+              Your session needs to be renewed — sign in again to continue.
+            </>
+          ) : (
+            <>
+              <WifiOff size={14} strokeWidth={1.75} aria-hidden="true" />
+              Can&apos;t reach the server while checking session status — showing the last known status. Retrying
+              automatically; this doesn&apos;t mean WhatsApp itself is offline.
+            </>
+          )}
+        </p>
+      ) : null}
 
       {!sessionName ? (
         <Card>

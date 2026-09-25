@@ -67,4 +67,14 @@ export const config = {
   // browser/frontend JWT. Must match OFFICE_DISPATCH_SERVICE_KEY on the
   // backend/.env side.
   officeDispatchServiceKey: process.env.OFFICE_DISPATCH_SERVICE_KEY ?? '',
+
+  // Phase 12 (Security hardening) MUST-FIX #5 — docs/06-SECURITY.md "Rate
+  // limits: login, send, session control, blast, expensive sync". General
+  // per-IP request-rate ceiling applied to the frontend-JWT-gated `/api`
+  // routes (session.ts, messages.ts) — see middleware/rateLimit.ts. A
+  // generous circuit-breaker default, not a tight per-endpoint budget:
+  // this project's real scale is a handful of operators polling the Inbox
+  // against a single WAHA session (docs/00-MASTER-SPEC.md), so this
+  // exists to catch a genuine flood, not ordinary interactive use.
+  rateLimitMaxPerMinute: Number(process.env.RATE_LIMIT_MAX_PER_MINUTE ?? 300),
 };

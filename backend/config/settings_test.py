@@ -21,3 +21,18 @@ DATABASES = {
         'NAME': ':memory:',
     }
 }
+
+# Phase 12 (Security hardening) — settings.py's default CACHES points at a
+# real Redis instance (shared with Celery), matching the deployed/Docker
+# environment this test-settings module explicitly does NOT represent (see
+# this module's own docstring above). A sandbox running `manage.py test`
+# under config.settings_test has no such Redis reachable, and DRF's
+# cache-backed throttling (settings.py REST_FRAMEWORK) would otherwise fail
+# every request with a connection error rather than a clean 429. LocMemCache
+# is process-local and per-test-run only — fine here since nothing in this
+# test settings module needs cross-process cache sharing.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    }
+}

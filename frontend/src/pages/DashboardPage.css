@@ -101,6 +101,40 @@
   opacity: 0.85;
 }
 
+/* Reconciliation sync-status card's "possibly stuck" chip + recovery
+   feedback — same warning-chip formula as InboxPage.css's
+   .wa-inbox__sync-stuck, adapted to stack vertically (card body is
+   narrower than Inbox's full-width page banner) rather than InboxPage's
+   side-by-side flex layout. */
+.wa-metric-card__sync-stuck {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--text-secondary);
+}
+
+.wa-metric-card__sync-stuck-text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--font-size-caption);
+}
+
+.wa-metric-card__sync-recovery-feedback {
+  margin-top: var(--space-2);
+  font-size: var(--font-size-caption);
+}
+
+.wa-metric-card__sync-recovery-feedback--success {
+  color: var(--color-success);
+}
+
 .wa-activity-list {
   display: flex;
   flex-direction: column;

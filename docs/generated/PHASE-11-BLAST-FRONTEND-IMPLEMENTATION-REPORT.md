@@ -1,5 +1,13 @@
 # Phase 11 — Blast Frontend Implementation Report
 
+> **Phase labeling note (added 2026-09-26):** this report's passing
+> reference below to "the prior session's Phase 13.B" uses an informal
+> label. That label is not part of the canonical roadmap's Phase 13
+> ("Failure/security testing", `docs/15-CODING-PHASES.md`) — it refers to
+> earlier reconciliation-recovery/diagnostics-UI work that is properly a
+> continuation of Phase 4/Phase 9. See
+> `docs/11-DECISIONS-AND-OPEN-QUESTIONS.md` for the recorded decision.
+
 ## 1. Objective
 
 Build the frontend for Phase 11 "Blast" (controlled bulk WhatsApp send) on

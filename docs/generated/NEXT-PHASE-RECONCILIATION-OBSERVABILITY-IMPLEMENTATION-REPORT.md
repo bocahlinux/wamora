@@ -1,5 +1,16 @@
 # Reconciliation Execution Observability — Implementation Report
 
+> **Phase labeling note (added 2026-09-26, per
+> `docs/generated/PHASE-ROADMAP-STATUS-AUDIT-REPORT.md`):** this report
+> refers to prior work as "Phase 13.A". That label is NOT part of the
+> canonical roadmap's Phase 13 ("Failure/security testing",
+> `docs/15-CODING-PHASES.md`) — it is properly a continuation of Phase 4
+> ("Reconciliation") and Phase 9 ("Offline/degraded mode"). The "13.A"
+> numbering was informal, originating from an internal subsection label
+> in `NEXT-PHASE-RECONCILIATION-RECOVERY-DESIGN-AUDIT-REPORT.md`, and is
+> not an official roadmap sub-phase. See
+> `docs/11-DECISIONS-AND-OPEN-QUESTIONS.md` for the recorded decision.
+
 **Conclusion: Complete.** `SyncCheckpoint` now carries two additive
 fields — `last_run_trigger_source` and `last_run_task_id` — populated
 at the start of every reconciliation run by all three trigger paths

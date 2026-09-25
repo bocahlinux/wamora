@@ -1,5 +1,19 @@
 # Phase 13.B — Reconciliation Diagnostics UI — Design Audit Report
 
+> **Phase labeling note (added 2026-09-26, per
+> `docs/generated/PHASE-ROADMAP-STATUS-AUDIT-REPORT.md`):** despite this
+> report's filename/title (and its references to "Phase 13.A/13.B")
+> using "13.B", this work is NOT part of the canonical roadmap's Phase 13
+> ("Failure/security testing", `docs/15-CODING-PHASES.md`). It is
+> properly a continuation of Phase 4 ("Reconciliation") and Phase 9
+> ("Offline/degraded mode") — a diagnostics UI surfacing reconciliation
+> recovery state. The "13.A"/"13.B" numbering was informal, originating
+> from an internal subsection label ("Section 13, options A and B") in
+> `NEXT-PHASE-RECONCILIATION-RECOVERY-DESIGN-AUDIT-REPORT.md`, and is
+> retained here only for continuity with existing links — it does not
+> reflect the official roadmap. See
+> `docs/11-DECISIONS-AND-OPEN-QUESTIONS.md` for the recorded decision.
+
 **This is a read-only design audit. No source, migration, Docker,
 Compose, or configuration file was modified. No container was started,
 stopped, or restarted. No reconciliation was triggered. No write

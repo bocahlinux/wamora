@@ -26,13 +26,46 @@ from config.env import load_env_file  # noqa: E402
 load_env_file(BASE_DIR / '.env')
 
 
-# SECURITY WARNING: keep the secret key used in production secret!
-# The fallback below is a non-secret local-dev-only placeholder; production
-# MUST set DJANGO_SECRET_KEY explicitly.
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-dev-only-placeholder')
-
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
+
+# SECURITY WARNING: keep the secret key used in production secret!
+# Phase 12 (Security hardening) MUST-FIX #2 — docs/generated/PHASE-12-SECURITY-HARDENING-DESIGN-AUDIT-REPORT.md
+# Section 3.4: previously this fell back to a hardcoded, well-known
+# placeholder whenever DJANGO_SECRET_KEY was unset, in *any* environment,
+# including production — silently running with a guessable key used for
+# session signing/password-reset tokens/other Django-internal crypto,
+# rather than refusing to start. Every other secret in this codebase
+# (INTERNAL_SERVICE_KEY, OFFICE_DISPATCH_SERVICE_KEY, WAHA_API_KEY, ...)
+# already fails closed on a missing value; this brings SECRET_KEY in line.
+#
+# `.get(..., '')` (not a truthy default) deliberately: Compose's env_file:
+# mechanism sets an unset .env value to a literal empty string, not an
+# absent key, so `os.environ.get(key, default)` would never even see the
+# default in that case — checking truthiness below is what actually
+# matters (docs/generated/PHASE-F-DEVELOPMENT-FINALIZATION-IMPLEMENTATION-REPORT.md's
+# own documented gotcha, restated in infrastructure/development/.env.example).
+#
+# The insecure placeholder remains available, but ONLY for local dev
+# (DEBUG=True) or this project's own SQLite test-settings module
+# (config.settings_test, config/settings_test.py's own docstring: "NOT
+# used in any deployed environment") — never for a real, non-DEBUG
+# deployment. `manage.py test`'s default settings module (config.settings,
+# unchanged) is unaffected by this exemption and continues to require a
+# real value from infrastructure/development/.env, which already sets one.
+_DJANGO_SECRET_KEY_ENV = os.environ.get('DJANGO_SECRET_KEY', '')
+_USING_TEST_SETTINGS = os.environ.get('DJANGO_SETTINGS_MODULE', '') == 'config.settings_test'
+
+if _DJANGO_SECRET_KEY_ENV:
+    SECRET_KEY = _DJANGO_SECRET_KEY_ENV
+elif DEBUG or _USING_TEST_SETTINGS:
+    SECRET_KEY = 'django-insecure-dev-only-placeholder'
+else:
+    raise ImproperlyConfigured(
+        'DJANGO_SECRET_KEY must be set when DEBUG=False. Refusing to start '
+        'with an insecure placeholder secret key in a non-DEBUG deployment '
+        '(see docs/06-SECURITY.md).'
+    )
 
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if h.strip()]
 
@@ -333,6 +366,28 @@ BFF_INTERNAL_BASE_URL = os.environ.get('BFF_INTERNAL_BASE_URL', '')
 BFF_INTERNAL_TIMEOUT_MS = int(os.environ.get('BFF_INTERNAL_TIMEOUT_MS', '10000'))
 
 
+# Cache — Phase 12 (Security hardening) MUST-FIX #5: DRF's cache-backed
+# request throttling (below) needs a real, shared cache backend, which this
+# project did not previously configure at all (Django would otherwise fall
+# back to its own process-local, per-worker LocMemCache default, which
+# cannot correctly rate-limit across multiple gunicorn worker processes).
+# Reuses the SAME Redis instance already provisioned for Celery above
+# (CELERY_BROKER_URL/CELERY_RESULT_BACKEND) rather than standing up new
+# infrastructure — this project's own hard rule against unnecessary new
+# services. A different logical DB index (1, not Celery's 0) keeps cache
+# keys and the Celery broker/result data from colliding in the same Redis
+# instance. Uses Django's own built-in `django.core.cache.backends.redis.RedisCache`
+# (available since Django 4.0 — this project runs 4.2) — no extra
+# dependency (e.g. django-redis) needed.
+DJANGO_CACHE_REDIS_URL = os.environ.get('DJANGO_CACHE_REDIS_URL', 'redis://redis:6379/1')
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': DJANGO_CACHE_REDIS_URL,
+    }
+}
+
+
 # Django REST Framework
 # docs/07-API-CONTRACT.md API principles: "JSON, consistent errors, request IDs, ...".
 # Browsable API is dev-only; production responses are JSON-only.
@@ -353,6 +408,46 @@ REST_FRAMEWORK = {
     # effect on them.
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
+    # Phase 12 (Security hardening) MUST-FIX #5 — docs/06-SECURITY.md "Rate
+    # limits: login, send, session control, blast, expensive sync"; this
+    # project had zero generic rate limiting anywhere outside Blast's own
+    # domain-specific dispatch throttle (apps/blast/tasks.py, an unrelated
+    # concept). DRF's own built-in throttling — no new dependency needed.
+    # Project-wide default: every DRF view gets a general per-IP (anon) or
+    # per-user throttle unless it overrides `throttle_classes` itself (as
+    # `authn.LoginView` does, below, with a much stricter login-specific
+    # rate — see apps/authn/throttling.py).
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        # Deliberately generous circuit-breaker defaults, not a tight
+        # per-endpoint budget — this project's actual scale is a handful of
+        # operators/sessions (docs/00-MASTER-SPEC.md) and several
+        # machine-authenticated internal routes (webhooks, BFF/Celery
+        # internal calls) that also fall under these same DRF-wide
+        # defaults unless a view sets its own `throttle_classes` (as
+        # `authn.LoginView` does). These exist to catch a genuine flood
+        # (hundreds of requests/minute from one source), not to constrain
+        # ordinary interactive use (e.g. InboxPage.tsx's own polling) or
+        # this project's own test suite (~430 tests, comfortably under
+        # either number even in the pessimistic case of every test
+        # consuming one unit from the same shared anonymous/IP bucket).
+        # The login-specific 'login' rate below is the actual tight,
+        # brute-force-specific control the audit called for.
+        'anon': '1000/minute',
+        'user': '2000/minute',
+        # Deliberately much stricter — the highest-severity gap the audit
+        # identified (unauthenticated credential-guessing surface,
+        # compounded by the fact login was previously unaudited and
+        # unbounded-length too — MUST-FIX #3/#4). 5/minute per client IP
+        # is enough for a legitimate user who mistypes a password a couple
+        # of times, while making automated brute-force guessing
+        # impractical. Login lockout (account-level) was explicitly
+        # decided AGAINST for v1 — this rate limit is the sole control.
+        'login': '5/minute',
+    },
 }
 
 

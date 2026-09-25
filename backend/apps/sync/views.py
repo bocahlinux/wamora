@@ -30,7 +30,7 @@ from rest_framework.views import APIView
 
 from apps.audit.models import AuditLog
 from apps.authn.authentication import JWTAuthentication
-from apps.authn.permissions import HasSystemAdministrationScope
+from apps.authn.permissions import HasReadingScope, HasSystemAdministrationScope
 from apps.sync.models import SyncCheckpoint
 from apps.waha_sessions.models import WahaSession
 from apps.webhooks.models import WebhookEvent
@@ -142,11 +142,21 @@ def _is_possibly_stuck(checkpoint):
 class SyncStatusView(APIView):
     """GET /api/sync/status/<session_name>/
 
-    Auth: IsAuthenticated only, matching apps.dashboard's
-    MessagesStatsView/ActivityFeedView precedent exactly (see the design
-    report Section 5) — sync status is operational/system state, not
-    conversation content, so apps.chats's additional HasReadingScope gate
-    is deliberately not applied here.
+    Auth: Phase 12 (Security hardening) MUST-FIX #1 —
+    docs/generated/PHASE-12-SECURITY-HARDENING-DESIGN-AUDIT-REPORT.md
+    Section 3.2. This previously used IsAuthenticated only, deliberately
+    (see the Phase 9.1A design report Section 5's "operational/system
+    state, not conversation content" reasoning, and the superseded
+    docstring this replaces) — the Phase 12 audit re-examined that
+    precedent and found it inconsistent with docs/06-SECURITY.md's
+    "separate permissions for ... reading, ..." principle applied
+    everywhere else, so it is now gated behind HasReadingScope, exactly
+    mirroring apps.chats/apps.dashboard. Every normal operator's token
+    already carries the 'reading' scope (Django Group membership named
+    'reading') because the Inbox (frontend/src/pages/InboxPage.tsx)
+    already depends on the exact same scope for apps.chats — this does
+    not newly require anything a working Inbox/Dashboard user doesn't
+    already have.
 
     404 (via get_object_or_404, the same pattern ChatMessagesView/
     ChatMarkReadView already use) when `session_name` names no known
@@ -156,7 +166,7 @@ class SyncStatusView(APIView):
     """
 
     authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasReadingScope]
 
     def get(self, request, session_name):
         session = get_object_or_404(WahaSession, name=session_name)
