@@ -158,6 +158,8 @@ def reconcile_session(
     limit=DEFAULT_MESSAGE_LIMIT,
     max_pages=DEFAULT_MAX_PAGES,
     waha_client=None,
+    trigger_source=None,
+    task_id=None,
 ):
     """Reconciles the given session's already-known chats (all of them, or
     only `chat_ids` if provided) against WAHA REST history. Never marks the
@@ -167,7 +169,20 @@ def reconcile_session(
     re-sync of specific chats), first runs chat discovery (see
     `_discover_chats`) so a chat WAHA has but Django has never received a
     webhook for gets a row created before the per-chat loop below runs —
-    in the same pass, not a separate one."""
+    in the same pass, not a separate one.
+
+    `trigger_source`/`task_id` — docs/generated/NEXT-PHASE-RECONCILIATION-OBSERVABILITY-DESIGN-AUDIT-REPORT.md
+    Section 8/13. Explicit, caller-supplied context only (never inferred
+    from the call stack, never a fabricated ID) — each caller already
+    knows, at its own call site, which SyncCheckpoint.TRIGGER_* it is and
+    (for a Celery-executed caller) its own real `self.request.id`. Both
+    default to `None`/absent so every existing caller (and every existing
+    test) that doesn't pass them keeps working unchanged. Recorded once,
+    at the START of the run (see write (A) below), not only on
+    completion, so the metadata is already durably visible even if this
+    run never reaches its own end — this is purely descriptive metadata:
+    it never changes checkpoint_value, retry behavior, or the
+    reconciliation loop itself."""
     session = WahaSession.objects.get(name=session_name)
     checkpoint, _ = SyncCheckpoint.objects.get_or_create(session=session)
 
@@ -181,7 +196,14 @@ def reconcile_session(
             stop_at_timestamp = None
 
     checkpoint.status = SyncCheckpoint.STATUS_RUNNING
-    checkpoint.save(update_fields=['status', 'updated_at'])
+    update_fields = ['status', 'updated_at']
+    if trigger_source is not None:
+        checkpoint.last_run_trigger_source = trigger_source
+        update_fields.append('last_run_trigger_source')
+    if task_id is not None:
+        checkpoint.last_run_task_id = task_id
+        update_fields.append('last_run_task_id')
+    checkpoint.save(update_fields=update_fields)
 
     client = waha_client or WahaClient()
     result = ReconciliationResult()

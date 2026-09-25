@@ -62,6 +62,32 @@ export function mapWahaStatus(raw: string | undefined): StatusKind {
   }
 }
 
+/** Maps Phase 9.1A's sync-status endpoint's raw `sync_status` string
+ * (docs/generated/PHASE9-1A-SYNC-STATUS-IMPLEMENTATION-REPORT.md) into the
+ * same visual vocabulary above — deliberately scoped to *data freshness*
+ * only, never to WhatsApp/connectivity state (see
+ * docs/generated/PHASE9-1E-DESIGN-AUDIT-REPORT.md Section 3/4): no label
+ * anywhere here says or implies "offline"/"disconnected"/"WhatsApp". Never
+ * invents a status the backend didn't report — an unrecognized value
+ * falls back to 'unknown' rather than guessing, same as the two mappers
+ * above. */
+export function mapSyncStatus(raw: string | undefined): StatusKind {
+  switch (raw) {
+    case 'healthy':
+      return 'healthy';
+    case 'running':
+      return 'syncing';
+    case 'stale':
+      return 'warning';
+    case 'failed':
+      return 'error';
+    case 'never_synced':
+      return 'unknown';
+    default:
+      return 'unknown';
+  }
+}
+
 /** Maps the Phase 8 dashboard activity feed's raw `result` string
  * (AuditLog: 'success'/'failure'; WebhookEvent: 'pending'/'processed'/
  * 'failed'/'unsupported' — apps/audit/models.py, apps/webhooks/models.py)

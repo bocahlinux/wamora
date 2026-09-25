@@ -17,3 +17,18 @@ class HasReadingScope(BasePermission):
         if not claims:
             return False
         return 'reading' in claims.get('scopes', [])
+
+
+class HasSystemAdministrationScope(BasePermission):
+    """Phase 13.A — docs/generated/PHASE-13A-MANUAL-RECONCILIATION-RECOVERY-IMPLEMENTATION-REPORT.md.
+    Same shape as HasReadingScope, for the 'system administration' scope
+    (already defined in settings.JWT_SCOPES/docs/06-SECURITY.md's own
+    category names, but never checked by any endpoint before this) — the
+    first administrative/state-changing, human-JWT-authenticated Django
+    endpoint, so this is the first use of this scope name."""
+
+    def has_permission(self, request, view):
+        claims = request.auth
+        if not claims:
+            return False
+        return 'system administration' in claims.get('scopes', [])

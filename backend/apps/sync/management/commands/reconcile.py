@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 
+from apps.sync.models import SyncCheckpoint
 from apps.sync.reconciliation import reconcile_session
 from apps.waha_sessions.models import WahaSession
 
@@ -29,6 +30,8 @@ class Command(BaseCommand):
             chat_ids=options['chat_ids'],
             limit=options['limit'],
             max_pages=options['max_pages'],
+            trigger_source=SyncCheckpoint.TRIGGER_MANAGEMENT_COMMAND,
+            task_id='',
         )
 
         self.stdout.write(f'chats_processed={result.chats_processed}')

@@ -1,19 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
-import { MessageCircle, Paperclip, Send, Users } from 'lucide-react';
+import { LogIn, MessageCircle, Paperclip, Send, Users, WifiOff } from 'lucide-react';
 
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { LoadingState } from '../components/ui/LoadingState';
 import { PageHeader } from '../components/ui/PageHeader';
-import type { ApiError } from '../lib/api';
+import { mapSyncStatus, StatusBadge } from '../components/ui/StatusBadge';
+import type { ApiError, ApiResult } from '../lib/api';
 import { sendMessage } from '../lib/bffApi';
 import {
   getChatMessages,
   getChats,
+  getSyncStatus,
   markChatRead,
   type ChatMessage,
   type ChatSummary,
+  type SyncStatus,
 } from '../lib/djangoApi';
 import { config } from '../lib/config';
 import { useApiQuery } from '../lib/useApiQuery';
@@ -30,6 +33,39 @@ import './InboxPage.css';
 // never synced to WAHA (Section 2).
 const CHAT_LIST_POLL_MS = 8000;
 const MESSAGES_POLL_MS = 5000;
+
+// Connectivity indicator (Phase 9.1D — docs/generated/PHASE9-1-DESIGN-AUDIT-REPORT.md
+// Section 5/7 "Signal A"). Frontend-only: derived entirely from the
+// existing ApiError.kind taxonomy already returned by every request
+// (lib/api.ts) — no new backend endpoint. Deliberately silent for a single
+// isolated poll failure (requires CONNECTIVITY_FAILURE_THRESHOLD
+// *consecutive* non-auth failures before showing anything) so a one-off
+// blip never flickers a banner in and out every 5-8s; a single success at
+// any point resets it immediately. This says nothing about whether
+// reconciliation/sync data is current (Signal B, not built by this task)
+// or whether WhatsApp itself has new activity — it only reports whether
+// this page's own requests to the backend are succeeding right now.
+const CONNECTIVITY_FAILURE_THRESHOLD = 2;
+
+type ConnectivityIssue = 'unreachable' | 'unauthorized';
+
+// Sync status (Phase 9.1E — docs/generated/PHASE9-1E-DESIGN-AUDIT-REPORT.md
+// Section 6). A multiple of CHAT_LIST_POLL_MS, not an independently
+// invented interval: the underlying data (SyncCheckpoint) changes far
+// more slowly than chat/message content — RECONCILIATION_INTERVAL_SECONDS
+// defaults to 900s backend-side — so polling this every 8s would be
+// needlessly frequent. Mirrors the backend view's own
+// STALE_THRESHOLD_MULTIPLIER philosophy: a multiplier on an existing
+// constant, not a new independent number.
+const SYNC_STATUS_POLL_MS = CHAT_LIST_POLL_MS * 4;
+
+const SYNC_STATUS_LABEL: Record<SyncStatus['sync_status'], string> = {
+  healthy: 'Synced',
+  running: 'Syncing',
+  stale: 'Sync delayed',
+  failed: 'Sync error',
+  never_synced: 'Not synced',
+};
 
 function mergeNewestFirst(existing: ChatMessage[], freshPage1: ChatMessage[]): ChatMessage[] {
   const existingIds = new Set(existing.map((m) => m.id));
@@ -55,6 +91,97 @@ function chatDisplay(chat: ChatSummary): { primary: string; secondary: string | 
 export function InboxPage() {
   const sessionName = config.wahaSessionName;
 
+  // ---- Connectivity indicator (Phase 9.1D) -------------------------------
+  // Fed only by the two background polling loops below (chat list,
+  // messages) — deliberately not by the first-load queries (which already
+  // have their own ErrorState + manual retry) or by write actions
+  // (send/mark-as-read, which already have their own feedback). One
+  // combined signal for both loops, not two separate indicators, since in
+  // practice a Django/network outage affects both simultaneously (design
+  // report Section 7's recommended default).
+  const [connectivityIssue, setConnectivityIssue] = useState<ConnectivityIssue | null>(null);
+  const connectivityFailureCountRef = useRef(0);
+
+  function reportPollOutcome(result: ApiResult<unknown>) {
+    if (result.ok) {
+      connectivityFailureCountRef.current = 0;
+      setConnectivityIssue(null);
+      return;
+    }
+    if (result.error.kind === 'unauthorized' || result.error.kind === 'forbidden') {
+      // Not a connectivity problem — never mislabel this as "server
+      // offline" (the task's explicit requirement). In practice
+      // AuthContext's own JWT-expiry timer already redirects to /login
+      // before this is usually seen; this covers the narrower case of a
+      // server-side 401/403 the client's own decoded expiry didn't
+      // predict. No threshold delay — retrying will not fix this, so
+      // there's no reason to wait for a second failure.
+      connectivityFailureCountRef.current = 0;
+      setConnectivityIssue('unauthorized');
+      return;
+    }
+    // Every other ApiError.kind (network_error, timeout, server_error,
+    // not_found, validation, unknown) is treated uniformly as
+    // connectivity-class — the existing taxonomy already distinguishes
+    // "auth" from everything else, and this indicator does not need a
+    // finer split than that.
+    connectivityFailureCountRef.current += 1;
+    if (connectivityFailureCountRef.current >= CONNECTIVITY_FAILURE_THRESHOLD) {
+      setConnectivityIssue('unreachable');
+    }
+  }
+
+  // ---- Sync status (Phase 9.1E) ------------------------------------------
+  // Independent of chat-list/messages polling — a page-level,
+  // session-scoped signal, not tied to selectedChatId (design report
+  // Section 5). No dedicated loading/error UI is needed (Section 3: "not
+  // yet fetched" renders nothing), so this is one effect — an immediate
+  // fetch plus its own interval — rather than useApiQuery's separate
+  // first-load/poll split, which exists specifically to drive a
+  // LoadingState/ErrorState this feature doesn't need.
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+
+  useEffect(() => {
+    // Reset immediately so a previous session's status is never shown
+    // against a new session (defensive — config.wahaSessionName is a
+    // static build-time value in practice, but this keeps the guarantee
+    // explicit rather than assumed).
+    setSyncStatus(null);
+    if (!sessionName) return undefined;
+
+    async function fetchSyncStatus() {
+      const result = await getSyncStatus(sessionName);
+      if (result.ok) {
+        setSyncStatus(result.data);
+        reportPollOutcome(result);
+        return;
+      }
+      if (result.error.kind === 'not_found') {
+        // Django has never heard of this session name at all — not a
+        // connectivity problem (never fed into reportPollOutcome).
+        // Treated identically to a known session that simply hasn't been
+        // reconciled yet (design report Section 9).
+        setSyncStatus({
+          session: sessionName,
+          sync_status: 'never_synced',
+          checkpoint_status: null,
+          last_run_at: null,
+          seconds_since_last_run: null,
+          checkpoint_updated_at: null,
+        });
+        return;
+      }
+      // Connectivity-class failure — keep showing the last known sync
+      // status rather than blanking it, the same "freeze, don't blank"
+      // discipline the chat list/messages polls already use below.
+      reportPollOutcome(result);
+    }
+
+    fetchSyncStatus();
+    const interval = setInterval(fetchSyncStatus, SYNC_STATUS_POLL_MS);
+    return () => clearInterval(interval);
+  }, [sessionName]);
+
   // ---- Chat list --------------------------------------------------------
   const chatsQuery = useApiQuery(() => getChats(1), []);
   const [chats, setChats] = useState<ChatSummary[] | null>(null);
@@ -69,8 +196,10 @@ export function InboxPage() {
       const result = await getChats(1);
       // Silent background refresh — a transient failure just skips this
       // tick, it never replaces an already-shown, working chat list with
-      // an error state.
+      // an error state. The connectivity indicator (Phase 9.1D) is the
+      // only thing that reacts to a failed tick now.
       if (result.ok) setChats(result.data.results);
+      reportPollOutcome(result);
     }, CHAT_LIST_POLL_MS);
     return () => clearInterval(interval);
   }, []);
@@ -106,6 +235,7 @@ export function InboxPage() {
     const interval = setInterval(async () => {
       const result = await getChatMessages(selectedChatId, 1);
       if (result.ok) setMessages((prev) => mergeNewestFirst(prev ?? [], result.data.results));
+      reportPollOutcome(result);
     }, MESSAGES_POLL_MS);
     return () => clearInterval(interval);
   }, [selectedChatId]);
@@ -133,38 +263,73 @@ export function InboxPage() {
   }
 
   // ---- Composer -------------------------------------------------------------
+  // Three-way send feedback (Phase 9.0 — docs/generated/PHASE9-DESIGN-AUDIT-REPORT.md
+  // Section 10/12, docs/generated/PHASE9-0-UNKNOWN-SEND-OUTCOME-IMPLEMENTATION-REPORT.md):
+  // mirrors SessionsPage.tsx's existing, proven ActionFeedback pattern for
+  // the exact same ambiguity (a BFF/WAHA timeout — genuinely unknown
+  // whether WhatsApp received it). Replaces the previous two independent
+  // booleans (`sendError`/`sendConfirmed`), which could not represent
+  // "sent, but ambiguous" as a distinct, renderable state.
+  type SendFeedback = { kind: 'success' } | { kind: 'unknown' } | { kind: 'error'; error: ApiError };
+
   const [draftText, setDraftText] = useState('');
   const [sendBusy, setSendBusy] = useState(false);
-  const [sendError, setSendError] = useState<ApiError | null>(null);
-  const [sendConfirmed, setSendConfirmed] = useState(false);
+  const [sendFeedback, setSendFeedback] = useState<SendFeedback | null>(null);
 
   async function handleSend() {
     const text = draftText.trim();
     if (!text || !selectedChat || !sessionName || sendBusy) return;
     setSendBusy(true);
-    setSendError(null);
-    setSendConfirmed(false);
+    setSendFeedback(null);
     const result = await sendMessage(sessionName, selectedChat.provider_chat_id, text, crypto.randomUUID());
     setSendBusy(false);
     if (!result.ok) {
-      setSendError(result.error);
+      setSendFeedback({ kind: 'error', error: result.error });
       return;
     }
     setDraftText('');
-    // The just-sent message reaches Django's durable copy only once it
-    // round-trips through WAHA's own webhook, not instantly — this
-    // confirms the send itself, not that history has caught up yet
-    // (never fabricate a local message bubble for what hasn't actually
-    // been persisted). The polling loop above will pick it up once it
-    // lands.
-    setSendConfirmed(result.data.status !== 'unknown');
+    // 'sent': the just-sent message reaches Django's durable copy only once
+    // it round-trips through WAHA's own webhook or reconciliation, not
+    // instantly — this confirms WAHA accepted the send, not that history
+    // has caught up yet (never fabricate a local message bubble for what
+    // hasn't actually been persisted). The polling loop above will pick it
+    // up once it lands.
+    // 'unknown': a BFF/WAHA timeout — whether WAHA even accepted the send
+    // is itself unconfirmed. Never presented as success or as failure,
+    // since neither is actually known.
+    setSendFeedback(result.data.status === 'unknown' ? { kind: 'unknown' } : { kind: 'success' });
   }
 
   const listRef = useRef<HTMLDivElement>(null);
 
   return (
     <div className="wa-inbox">
-      <PageHeader title="Inbox" description="Conversations and messages" />
+      <PageHeader
+        title="Inbox"
+        description="Conversations and messages"
+        actions={
+          syncStatus ? (
+            <StatusBadge status={mapSyncStatus(syncStatus.sync_status)} label={SYNC_STATUS_LABEL[syncStatus.sync_status]} />
+          ) : null
+        }
+      />
+
+      {connectivityIssue ? (
+        <p className="wa-inbox__connectivity" role="status">
+          {connectivityIssue === 'unauthorized' ? (
+            <>
+              <LogIn size={14} strokeWidth={1.75} aria-hidden="true" />
+              Your session needs to be renewed — sign in again to continue.
+            </>
+          ) : (
+            <>
+              <WifiOff size={14} strokeWidth={1.75} aria-hidden="true" />
+              Can&apos;t reach the server right now — showing the last data loaded. Retrying
+              automatically; this doesn&apos;t mean WhatsApp itself is offline.
+            </>
+          )}
+        </p>
+      ) : null}
 
       {!sessionName ? (
         <EmptyState
@@ -286,8 +451,14 @@ export function InboxPage() {
                     {sendBusy ? 'Sending…' : 'Send'}
                   </Button>
                 </div>
-                {sendError ? <ErrorState error={sendError} /> : null}
-                {sendConfirmed ? (
+                {sendFeedback?.kind === 'error' ? (
+                  <ErrorState error={sendFeedback.error} />
+                ) : sendFeedback?.kind === 'unknown' ? (
+                  <p className="wa-inbox__send-unknown" role="status">
+                    The message status could not be confirmed — it may or may not have gone through. Wait a
+                    moment and check the conversation before sending it again, to avoid sending it twice.
+                  </p>
+                ) : sendFeedback?.kind === 'success' ? (
                   <p className="wa-inbox__send-confirmed" role="status">
                     Message sent — it will appear in the history once it's confirmed by the server.
                   </p>

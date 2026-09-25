@@ -1,12 +1,19 @@
 from unittest import mock
 
+import redis
+from django.conf import settings
 from django.test import SimpleTestCase
 from rest_framework.exceptions import NotFound
 from rest_framework.test import APIRequestFactory
 
 from apps.core.exceptions import api_exception_handler
 from apps.core.middleware import RequestIDMiddleware
-from apps.core.views import DatabaseHealthView, LivenessView
+from apps.core.views import (
+    REDIS_HEALTH_TIMEOUT_SECONDS,
+    DatabaseHealthView,
+    LivenessView,
+    RedisHealthView,
+)
 
 factory = APIRequestFactory()
 
@@ -46,6 +53,72 @@ class DatabaseHealthViewTests(SimpleTestCase):
         self.assertEqual(response.data, {'status': 'error', 'component': 'database'})
         self.assertNotIn('secret_user', str(response.data))
         self.assertNotIn('office-db-host', str(response.data))
+
+
+class RedisHealthViewTests(SimpleTestCase):
+    def test_redis_health_ok(self):
+        request = factory.get('/api/health/redis/')
+        with mock.patch('apps.core.views.redis.Redis.from_url') as mocked_from_url:
+            mocked_client = mocked_from_url.return_value
+            mocked_client.ping.return_value = True
+
+            response = RedisHealthView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'status': 'ok', 'component': 'redis'})
+
+    def test_redis_health_connection_error(self):
+        request = factory.get('/api/health/redis/')
+        with mock.patch('apps.core.views.redis.Redis.from_url') as mocked_from_url:
+            mocked_client = mocked_from_url.return_value
+            mocked_client.ping.side_effect = redis.exceptions.ConnectionError(
+                'Error 111 connecting to redis:6379. Connection refused.'
+            )
+
+            response = RedisHealthView.as_view()(request)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {'status': 'error', 'component': 'redis'})
+
+    def test_redis_health_timeout(self):
+        request = factory.get('/api/health/redis/')
+        with mock.patch('apps.core.views.redis.Redis.from_url') as mocked_from_url:
+            mocked_client = mocked_from_url.return_value
+            mocked_client.ping.side_effect = redis.exceptions.TimeoutError('Timeout reading from socket')
+
+            response = RedisHealthView.as_view()(request)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {'status': 'error', 'component': 'redis'})
+
+    def test_redis_health_error_does_not_leak_connection_details(self):
+        request = factory.get('/api/health/redis/')
+        with mock.patch('apps.core.views.redis.Redis.from_url') as mocked_from_url:
+            mocked_client = mocked_from_url.return_value
+            mocked_client.ping.side_effect = redis.exceptions.ConnectionError(
+                'Error connecting to redis://:supersecretpassword@internal-redis-host:6379/0'
+            )
+
+            response = RedisHealthView.as_view()(request)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {'status': 'error', 'component': 'redis'})
+        self.assertNotIn('supersecretpassword', str(response.data))
+        self.assertNotIn('internal-redis-host', str(response.data))
+
+    def test_redis_health_uses_bounded_timeout(self):
+        request = factory.get('/api/health/redis/')
+        with mock.patch('apps.core.views.redis.Redis.from_url') as mocked_from_url:
+            mocked_client = mocked_from_url.return_value
+            mocked_client.ping.return_value = True
+
+            RedisHealthView.as_view()(request)
+
+        mocked_from_url.assert_called_once_with(
+            settings.CELERY_BROKER_URL,
+            socket_connect_timeout=REDIS_HEALTH_TIMEOUT_SECONDS,
+            socket_timeout=REDIS_HEALTH_TIMEOUT_SECONDS,
+        )
 
 
 class RequestIDMiddlewareTests(SimpleTestCase):

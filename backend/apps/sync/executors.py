@@ -23,6 +23,7 @@ import time
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
+from apps.sync.models import SyncCheckpoint
 from apps.sync.reconciliation import reconcile_session
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 1.5
 
 
-def run_targeted_reconciliation_with_retry(session_name, chat_id, waha_client=None):
+def run_targeted_reconciliation_with_retry(session_name, chat_id, waha_client=None, task_id=''):
     """The one shared implementation of "reconcile this one chat, allowing
     for WAHA's REST history to lag slightly behind a just-accepted send".
     Called directly (in-process) by the `sync` executor below, and from
@@ -51,10 +52,21 @@ def run_targeted_reconciliation_with_retry(session_name, chat_id, waha_client=No
     `reconcile_session()` — safe to repeat because it is already
     duplicate-safe (the (session, provider_message_id) DB constraint) and
     idempotent by design. Stops as soon as a run actually inserts
-    something new; never retries past MAX_ATTEMPTS."""
+    something new; never retries past MAX_ATTEMPTS.
+
+    `task_id` — docs/generated/NEXT-PHASE-RECONCILIATION-OBSERVABILITY-DESIGN-AUDIT-REPORT.md
+    Section 8/13. Both trigger_source values this helper's two callers
+    ever pass are SyncCheckpoint.TRIGGER_TARGETED (this is always the
+    targeted, single-chat path) — only task_id differs: the real Celery
+    task ID from `reconcile_chat_task`'s own `self.request.id` for the
+    `celery` executor, or '' (no Celery task exists) for the `sync`
+    executor, the default here."""
     result = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        result = reconcile_session(session_name, chat_ids=[chat_id], waha_client=waha_client)
+        result = reconcile_session(
+            session_name, chat_ids=[chat_id], waha_client=waha_client,
+            trigger_source=SyncCheckpoint.TRIGGER_TARGETED, task_id=task_id,
+        )
         if result.messages_inserted > 0:
             return result
         if attempt < MAX_ATTEMPTS:
@@ -76,6 +88,8 @@ def trigger_reconciliation(session_name, chat_id):
     tests/callers that override the setting after startup)."""
     executor = settings.RECONCILIATION_EXECUTOR
     if executor == EXECUTOR_SYNC:
+        # No Celery task exists for this path — task_id stays '' (this
+        # helper's own default), never fabricated.
         return run_targeted_reconciliation_with_retry(session_name, chat_id)
     if executor == EXECUTOR_CELERY:
         from apps.sync.tasks import reconcile_chat_task

@@ -24,6 +24,7 @@ import logging
 from celery import shared_task
 
 from apps.sync.executors import run_targeted_reconciliation_with_retry
+from apps.sync.models import SyncCheckpoint
 from apps.sync.reconciliation import reconcile_session
 from apps.waha_sessions.models import WahaSession
 
@@ -47,7 +48,10 @@ def reconcile_session_task(self, session_name, limit=100, max_pages=10):
     session no longer exists) simply exhausts its 3 retries and is
     recorded as failed — no retry policy can distinguish that case without
     inventing an undocumented taxonomy of error types."""
-    result = reconcile_session(session_name, limit=limit, max_pages=max_pages)
+    result = reconcile_session(
+        session_name, limit=limit, max_pages=max_pages,
+        trigger_source=SyncCheckpoint.TRIGGER_PERIODIC, task_id=self.request.id,
+    )
     logger.info(
         'reconcile_session_task session=%s chats_processed=%d messages_inserted=%d '
         'chats_discovered=%d had_error=%s',
@@ -88,7 +92,7 @@ def reconcile_chat_task(self, session_name, chat_id):
     message, a different concern from that task's transient-failure
     safety net, and keeping them apart means neither's tests or behavior
     can accidentally affect the other."""
-    result = run_targeted_reconciliation_with_retry(session_name, chat_id)
+    result = run_targeted_reconciliation_with_retry(session_name, chat_id, task_id=self.request.id)
     logger.info(
         'reconcile_chat_task session=%s chat_id=%s messages_inserted=%d had_error=%s',
         session_name, chat_id, result.messages_inserted, result.had_error,

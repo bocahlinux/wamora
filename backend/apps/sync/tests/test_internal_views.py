@@ -65,7 +65,7 @@ class ReconciliationTriggerViewTests(APITestCase):
         with mock.patch('apps.sync.executors.reconcile_session') as mocked_reconcile:
             from apps.sync.reconciliation import reconcile_session as real_reconcile_session
 
-            mocked_reconcile.side_effect = lambda session_name, chat_ids, waha_client=None: (
+            mocked_reconcile.side_effect = lambda session_name, chat_ids, waha_client=None, **kwargs: (
                 real_reconcile_session(session_name, chat_ids=chat_ids, waha_client=client)
             )
             response = self.client.post(

@@ -212,6 +212,8 @@ fill in real values. **Never commit `.env` files** — only
 | `backend/.env.example` | Django secret key, allowed hosts, JWT private key (issuance), existing PostgreSQL connection, `WAHA_WEBHOOK_HMAC_SECRET`, Celery/Redis URLs, `RECONCILIATION_EXECUTOR`, `INTERNAL_SERVICE_KEY`, CORS origin. |
 | `infrastructure/tencent/.env.example` | Merged env for the Tencent `docker-compose.yml` (frontend/bff/waha). |
 | `infrastructure/office/.env.example` | Merged env for the Office `docker-compose.yml` (backend/celery/redis). |
+| `infrastructure/development/.env.example` | Merged env for the **Office development** stack (`infrastructure/development/office.yml` — Django/celery-worker/celery-beat, all Docker, hot-reloading). Copy to `infrastructure/development/.env`. |
+| `infrastructure/development/tencent.env.example` | Merged env for the **Tencent development** stack (`infrastructure/development/tencent.yml` — bff/frontend, all Docker, hot-reloading). Copy to `infrastructure/development/tencent.env`. Deliberately not named `.env.example` — that name is already used by the Office dev file above, in the same directory. |
 
 **`INTERNAL_SERVICE_KEY` must be set to the exact same value in both
 `bff/.env` and `backend/.env`** — it authenticates the BFF process to
@@ -301,6 +303,168 @@ cd infrastructure/office
 cp .env.example .env   # point DB_* at the existing PostgreSQL
 docker compose up --build
 ```
+
+**Office Development stack (Docker, hot reload)** — an alternative to
+the bare-host backend workflow above, for developers who want Django,
+Celery worker, Celery beat, and Redis all running as real Docker
+containers instead of manually-run processes. Reuses the exact same
+`backend/Dockerfile` production already uses (only the `command:` and a
+source bind mount differ) — see
+[`docs/generated/PHASE-B-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md`](docs/generated/PHASE-B-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md)
+and
+[`docs/generated/PHASE-B-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md`](docs/generated/PHASE-B-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md)
+for the full design/implementation record. BFF and frontend are **not**
+part of this stack — see those reports for why.
+
+1. **Prepare `.env`**:
+   ```
+   cd infrastructure/development
+   cp .env.example .env   # point DB_HOST/WAHA_BASE_URL/JWT keys/etc. at real values
+   ```
+   `DB_HOST`/`WAHA_BASE_URL` point at the **same kind of external
+   dependency** the bare-host workflow already requires (existing
+   PostgreSQL, a real WAHA instance) — this Compose file provisions
+   neither. On Docker Desktop, `host.docker.internal` reaches a
+   PostgreSQL instance running on your own host machine, if that's your
+   setup.
+2. **Build and start** (from the repository root):
+   ```
+   docker compose -f infrastructure/development/office.yml up --build
+   ```
+3. **Run detached** (background, keeps your terminal free):
+   ```
+   docker compose -f infrastructure/development/office.yml up -d
+   ```
+4. **View logs** (each service separately):
+   ```
+   docker compose -f infrastructure/development/office.yml logs -f backend
+   docker compose -f infrastructure/development/office.yml logs -f celery-worker
+   docker compose -f infrastructure/development/office.yml logs -f celery-beat
+   ```
+5. **Inspect Redis** (no published port — reachable only via `exec`):
+   ```
+   docker compose -f infrastructure/development/office.yml exec redis redis-cli ping
+   ```
+6. **Stop the environment**:
+   ```
+   docker compose -f infrastructure/development/office.yml down
+   ```
+7. **Migrations** (deliberately not run automatically):
+   ```
+   docker compose -f infrastructure/development/office.yml exec backend python manage.py migrate
+   ```
+8. **Django source changes** (`backend/**/*.py`) are picked up
+   automatically — the container bind-mounts `backend/` and runs
+   `manage.py runserver`, whose built-in `StatReloader` restarts the dev
+   server on its own, exactly like running it on bare host.
+9. **Celery worker/beat do *not* hot-reload** — Celery removed
+   `--autoreload` in Celery 5, and this environment deliberately does not
+   add `watchdog`/`watchmedo` or any other auto-restart dependency to
+   compensate. After editing any file that affects task behavior (in
+   practice, almost always just `backend/apps/sync/tasks.py`), restart
+   both manually:
+   ```
+   docker compose -f infrastructure/development/office.yml restart celery-worker celery-beat
+   ```
+10. **`RECONCILIATION_EXECUTOR=celery` is intentional here** — this
+    environment exists specifically so the targeted-reconciliation
+    trigger path (`apps/sync/executors.py`) actually enqueues onto the
+    real Celery worker/Redis in this stack, the same code path Office
+    production uses (with the same fix already applied there — see the
+    Phase A report), rather than silently running in-process (`sync`,
+    Django's own default, correct only for the plain bare-host workflow
+    above with no worker running at all).
+
+**Development vs. production, for this same Office-side backend
+infrastructure**:
+
+| | Development (`infrastructure/development/office.yml`) | Production (`infrastructure/office/docker-compose.yml`) |
+|---|---|---|
+| Web process | `python manage.py runserver 0.0.0.0:8000` | `gunicorn config.wsgi:application` |
+| Source | Bind-mounted from the host, live-editable | Baked into the image at build time only |
+| Celery worker/beat | Same commands as production, **no hot reload** — manual restart required | Same commands, no reload (not applicable — image doesn't change while running) |
+| Redis | Same image, no persistence, no published port | Same image, no persistence, no published port |
+| Image | Same, unmodified `backend/Dockerfile` | Same, unmodified `backend/Dockerfile` |
+
+**Tencent Development stack (Docker, hot reload)** — the BFF/frontend
+counterpart to the Office Development stack above, for developers who
+want the BFF and frontend running as real Docker containers with hot
+reload instead of manually-run `npm run dev` processes. Reuses the exact
+same `bff/Dockerfile`/`frontend/Dockerfile` production already uses
+(only the build `target`, `command:`, and a source bind mount differ) —
+see
+[`docs/generated/PHASE-C-BFF-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md`](docs/generated/PHASE-C-BFF-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md),
+[`docs/generated/PHASE-C-BFF-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md`](docs/generated/PHASE-C-BFF-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md),
+[`docs/generated/PHASE-D-FRONTEND-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md`](docs/generated/PHASE-D-FRONTEND-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md),
+and
+[`docs/generated/PHASE-D-FRONTEND-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md`](docs/generated/PHASE-D-FRONTEND-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md)
+for the full design/implementation record. This is a **separate Docker
+Compose project** from the Office Development stack — the two do not
+share a Docker network, and each can be started/stopped independently
+(see [`docs/generated/PHASE-E-FULL-DEVELOPMENT-INTEGRATION-REPORT.md`](docs/generated/PHASE-E-FULL-DEVELOPMENT-INTEGRATION-REPORT.md)
+for the full cross-stack integration proof). WAHA is **not** part of
+this stack — point `WAHA_BASE_URL` at a real, already-running instance
+if you need one.
+
+1. **Prepare `.env`**:
+   ```
+   cd infrastructure/development
+   cp tencent.env.example tencent.env   # fill in WAHA_BASE_URL/JWT keys/etc. if needed
+   ```
+   `DJANGO_INTERNAL_BASE_URL` already defaults to
+   `http://host.docker.internal:8000`, matching the Office Development
+   stack's own published port — leave it as-is unless you've remapped
+   that stack's port. If you're **also** running the
+   Office Development stack and want the BFF to actually reach it, set
+   `infrastructure/development/.env`'s `DJANGO_ALLOWED_HOSTS` to include
+   `host.docker.internal` (see that file's own comment, and
+   `docs/generated/PHASE-E-FULL-DEVELOPMENT-INTEGRATION-REPORT.md`
+   Section 10, for exactly why this one step is easy to miss).
+2. **Build and start** (from the repository root):
+   ```
+   docker compose -f infrastructure/development/tencent.yml up --build
+   ```
+3. **Run detached**:
+   ```
+   docker compose -f infrastructure/development/tencent.yml up -d
+   ```
+4. **View logs**:
+   ```
+   docker compose -f infrastructure/development/tencent.yml logs -f bff
+   docker compose -f infrastructure/development/tencent.yml logs -f frontend
+   ```
+5. **Verify it's up**:
+   ```
+   curl http://localhost:8080/health     # BFF
+   curl http://localhost:5173/           # frontend (Vite dev server)
+   ```
+6. **Stop the environment**:
+   ```
+   docker compose -f infrastructure/development/tencent.yml down
+   ```
+7. **BFF source changes** (`bff/src/**/*.ts`) are picked up
+   automatically — `tsx watch` restarts the process on its own.
+   **Frontend source changes** (`frontend/src/**/*.tsx`/`.ts`) trigger
+   Vite's own HMR, also automatic. Both containers set
+   `CHOKIDAR_USEPOLLING=true` — on some Docker Desktop/Windows bind-mount
+   configurations, file-change events don't otherwise propagate into the
+   container even though the file content itself syncs correctly; this
+   is `tsx`/Vite's own standard polling-fallback switch, not a new
+   dependency (see the Phase C implementation report for how this was
+   discovered).
+8. **Open the app**: `http://localhost:5173` in a browser — it calls BFF
+   (`:8080`) and Django (`:8000`) directly via published host ports, the
+   same URLs it would use in a fully bare-host setup.
+
+**Development vs. production, for this same Tencent-side infrastructure**:
+
+| | Development (`infrastructure/development/tencent.yml`) | Production (`infrastructure/tencent/docker-compose.yml`) |
+|---|---|---|
+| BFF process | `tsx watch src/index.ts` | `node dist/index.js` (compiled) |
+| Frontend process | `vite` (dev server, HMR) | Static build served by Nginx |
+| Source | Bind-mounted from the host, live-editable | Baked into the image at build time only |
+| BFF → Django | `http://host.docker.internal:8000` (explicit URL, no shared Docker network) | Real NetBird/LAN address (same explicit-URL pattern) |
+| Image | Same, unmodified `bff/Dockerfile`/`frontend/Dockerfile` (built from their `build` stage) | Same Dockerfiles, final production stage |
 
 ## Database
 

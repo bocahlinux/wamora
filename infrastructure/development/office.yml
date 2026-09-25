@@ -1,0 +1,77 @@
+# Office Development — see docs/generated/PHASE-B-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md
+# and docs/generated/PHASE-B-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md.
+#
+# Development-only stack for the Office-side backend infrastructure:
+# Django (runserver, hot-reloading) + Celery worker + Celery beat + Redis,
+# all built from the SAME, UNMODIFIED backend/Dockerfile already used by
+# infrastructure/office/docker-compose.yml — only `command:` and a source
+# bind mount differ from that production file, which this file does not
+# touch, extend, or replace.
+#
+# HARD RULE: this project MUST NOT define a PostgreSQL service here
+# (docs/CLAUDE.md rule #1, docs/13-FINAL-DEPLOYMENT-TOPOLOGY.md). Point
+# DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD (in this directory's .env)
+# at a real, already-reachable PostgreSQL instance instead — see
+# .env.example for guidance on reaching a host-machine PostgreSQL from
+# inside these containers.
+#
+# BFF/frontend and WAHA are deliberately NOT part of this file — see the
+# design report Sections 11/14 for why they remain external to this
+# backend-only development stack.
+
+services:
+  backend:
+    build:
+      context: ../../backend
+    image: wamora-backend-dev
+    command: python manage.py runserver 0.0.0.0:8000
+    env_file:
+      - .env
+    volumes:
+      - ../../backend:/app
+      - ${JWT_KEYS_HOST_PATH}:/run/secrets/wamora:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  celery-worker:
+    build:
+      context: ../../backend
+    image: wamora-backend-dev
+    command: celery -A config worker -l info
+    env_file:
+      - .env
+    volumes:
+      - ../../backend:/app
+      - ${JWT_KEYS_HOST_PATH}:/run/secrets/wamora:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  celery-beat:
+    build:
+      context: ../../backend
+    image: wamora-backend-dev
+    command: celery -A config beat -l info
+    env_file:
+      - .env
+    volumes:
+      - ../../backend:/app
+      - ${JWT_KEYS_HOST_PATH}:/run/secrets/wamora:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped

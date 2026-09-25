@@ -281,6 +281,77 @@ class ReconciliationCheckpointTests(TestCase):
         self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_ERROR)
         self.assertEqual(checkpoint.checkpoint_value, '')
 
+    # -- trigger_source / task_id (this task) -------------------------------
+    # docs/generated/NEXT-PHASE-RECONCILIATION-OBSERVABILITY-IMPLEMENTATION-REPORT.md.
+    # Purely additive metadata — never affects Message/Chat/Contact
+    # persistence or checkpoint_value/status semantics (already proven
+    # unchanged by every other test in this class, none of which passes
+    # these new parameters).
+
+    def test_trigger_source_and_task_id_are_recorded_when_passed(self):
+        client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1]})
+        reconcile_session(
+            'test_session', waha_client=client,
+            trigger_source=SyncCheckpoint.TRIGGER_PERIODIC, task_id='abc-123',
+        )
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.last_run_trigger_source, SyncCheckpoint.TRIGGER_PERIODIC)
+        self.assertEqual(checkpoint.last_run_task_id, 'abc-123')
+
+    def test_empty_task_id_clears_a_previously_recorded_one(self):
+        # A 'targeted' run via the sync executor explicitly passes
+        # task_id='' — this must overwrite (not preserve) a stale task_id
+        # left by an earlier, different run for the same session.
+        client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1]})
+        reconcile_session(
+            'test_session', waha_client=client,
+            trigger_source=SyncCheckpoint.TRIGGER_PERIODIC, task_id='stale-id',
+        )
+        reconcile_session(
+            'test_session', chat_ids=['000000000000000@lid'], waha_client=client,
+            trigger_source=SyncCheckpoint.TRIGGER_TARGETED, task_id='',
+        )
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.last_run_trigger_source, SyncCheckpoint.TRIGGER_TARGETED)
+        self.assertEqual(checkpoint.last_run_task_id, '')
+
+    def test_trigger_source_and_task_id_default_to_blank_when_not_passed(self):
+        # Backward compatibility: every pre-existing call site/test in this
+        # file that doesn't pass these new parameters must keep working
+        # unchanged — the fields simply stay at the model's own blank
+        # default, never populated with an invented value.
+        client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1]})
+        reconcile_session('test_session', waha_client=client)
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.last_run_trigger_source, '')
+        self.assertEqual(checkpoint.last_run_task_id, '')
+
+    def test_trigger_metadata_survives_to_a_failed_run_too(self):
+        # Recorded at the START of the run (write A) — still present even
+        # if the run ends in STATUS_ERROR, not only on success.
+        client = StubWahaClient(failing_chats={'000000000000000@lid'})
+        reconcile_session(
+            'test_session', waha_client=client,
+            trigger_source=SyncCheckpoint.TRIGGER_MANAGEMENT_COMMAND, task_id='',
+        )
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_ERROR)
+        self.assertEqual(checkpoint.last_run_trigger_source, SyncCheckpoint.TRIGGER_MANAGEMENT_COMMAND)
+
+    def test_trigger_metadata_does_not_affect_checkpoint_value_or_messages(self):
+        # Same assertions test_successful_run_advances_checkpoint_to_latest_timestamp
+        # already makes, now also passing trigger_source/task_id — proves
+        # the new parameters don't change this existing behavior at all.
+        client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1, REST_INBOUND_MESSAGE_2]})
+        reconcile_session(
+            'test_session', waha_client=client,
+            trigger_source=SyncCheckpoint.TRIGGER_PERIODIC, task_id='xyz',
+        )
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_OK)
+        self.assertNotEqual(checkpoint.checkpoint_value, '')
+        self.assertEqual(Message.objects.filter(session=self.session).count(), 2)
+
 
 class ReconciliationCrossPathConsistencyTests(TestCase):
     """REST parsing and webhook parsing must not contradict each other for

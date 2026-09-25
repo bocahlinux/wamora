@@ -24,6 +24,7 @@ urlpatterns = [
     path('api/auth/', include('apps.authn.urls')),
     path('api/dashboard/', include('apps.dashboard.urls')),
     path('api/chats/', include('apps.chats.urls')),
+    path('api/sync/', include('apps.sync.api_urls')),
     path('internal/', include('apps.operations.urls')),
     path('internal/', include('apps.audit.urls')),
     path('internal/', include('apps.sync.urls')),

@@ -20,6 +20,14 @@ export function getDatabaseHealth() {
   return request<ComponentHealth>(`${config.djangoBaseUrl}/api/health/database/`);
 }
 
+/** GET /api/health/redis/ — Celery broker Redis reachability
+ * (apps/core/views.py RedisHealthView, Phase 9.1C), independent of
+ * backend/database liveness. Says nothing about Celery worker
+ * liveness. No auth required. */
+export function getRedisHealth() {
+  return request<ComponentHealth>(`${config.djangoBaseUrl}/api/health/redis/`);
+}
+
 export interface Me {
   id: number;
   username: string;
@@ -147,6 +155,29 @@ export interface MarkChatReadResult {
 export function markChatRead(chatId: number) {
   return request<MarkChatReadResult>(`${config.djangoBaseUrl}/api/chats/${chatId}/read/`, {
     method: 'POST',
+    headers: authHeader(),
+  });
+}
+
+// Sync status (Phase 9.1A/9.1E) — docs/generated/PHASE9-1A-SYNC-STATUS-IMPLEMENTATION-REPORT.md,
+// docs/generated/PHASE9-1E-DESIGN-AUDIT-REPORT.md Section 10. Read-only;
+// never touches WAHA/Redis/Celery and never triggers reconciliation.
+
+export interface SyncStatus {
+  session: string;
+  sync_status: 'never_synced' | 'running' | 'failed' | 'healthy' | 'stale';
+  checkpoint_status: string | null;
+  last_run_at: string | null;
+  seconds_since_last_run: number | null;
+  checkpoint_updated_at: string | null;
+}
+
+/** GET /api/sync/status/:session/ — a session that Django doesn't know
+ * about at all resolves as a 404 (ApiError.kind: 'not_found'), which the
+ * caller (InboxPage.tsx) treats the same as 'never_synced' — see
+ * PHASE9-1E-DESIGN-AUDIT-REPORT.md Section 9. Not a connectivity error. */
+export function getSyncStatus(session: string) {
+  return request<SyncStatus>(`${config.djangoBaseUrl}/api/sync/status/${encodeURIComponent(session)}/`, {
     headers: authHeader(),
   });
 }

@@ -5,6 +5,23 @@
   min-height: 0;
 }
 
+/* Phase 9.1D — connectivity indicator (frontend -> backend reachability,
+   Signal A). Same warning-chip formula as .wa-inbox__send-unknown below,
+   reused rather than a new visual language; quiet by default (not
+   rendered at all unless InboxPage.tsx decides there's something to
+   report). */
+.wa-inbox__connectivity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-caption);
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--text-secondary);
+}
+
 .wa-inbox__panes {
   flex: 1;
   min-height: 0;
@@ -214,6 +231,20 @@
   padding: 0 var(--space-4) var(--space-3);
   font-size: var(--font-size-caption);
   color: var(--color-success);
+}
+
+/* Phase 9.0 — ambiguous ('unknown') send outcome. Deliberately more
+   visible than the plain success line above (a background chip, matching
+   SessionsPage.css's .wa-session-feedback--unknown treatment for the same
+   ambiguity) since this state needs the operator's attention, not just a
+   passive confirmation. */
+.wa-inbox__send-unknown {
+  margin: 0 var(--space-4) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-caption);
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--text-secondary);
 }
 
 @media (max-width: 1023px) {

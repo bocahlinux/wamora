@@ -17,6 +17,14 @@ __pycache__/
 venv/
 db.sqlite3
 
+# Celery beat's local schedule bookkeeping file — written into whatever
+# directory `celery beat` runs from (backend/ when bind-mounted for
+# Docker development, see infrastructure/development/office.yml); never
+# meant to be committed, same as db.sqlite3 above.
+celerybeat-schedule
+celerybeat-schedule.*
+celerybeat.pid
+
 # OS
 .DS_Store
 Thumbs.db

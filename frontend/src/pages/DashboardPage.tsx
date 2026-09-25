@@ -1,4 +1,4 @@
-import { Activity, Database, MessageSquare, Server, ShieldCheck, Smartphone, Webhook, Wifi } from 'lucide-react';
+import { Activity, Database, MessageSquare, Server, ShieldCheck, Smartphone, Webhook, Wifi, Zap } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { Card } from '../components/ui/Card';
@@ -6,10 +6,11 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { LoadingState } from '../components/ui/LoadingState';
 import { PageHeader } from '../components/ui/PageHeader';
-import { mapActivityResult, StatusBadge } from '../components/ui/StatusBadge';
-import { getBffHealth } from '../lib/bffApi';
+import { mapActivityResult, mapWahaStatus, StatusBadge } from '../components/ui/StatusBadge';
+import { getBffHealth, getSessionStatus, type SessionStatus } from '../lib/bffApi';
+import { config } from '../lib/config';
 import type { ActivityItem, DashboardActivity, DashboardMessages } from '../lib/djangoApi';
-import { getBackendHealth, getDashboardActivity, getDashboardMessages, getDatabaseHealth } from '../lib/djangoApi';
+import { getBackendHealth, getDashboardActivity, getDashboardMessages, getDatabaseHealth, getRedisHealth } from '../lib/djangoApi';
 import { useApiQuery } from '../lib/useApiQuery';
 import './DashboardPage.css';
 
@@ -148,18 +149,59 @@ function ActivityCard({ query }: { query: ReturnType<typeof useApiQuery<Dashboar
   );
 }
 
+// Row 2, single-session WAHA status. Mirrors SessionsPage.tsx's own
+// status display (same query, same StatusBadge/mapWahaStatus vocabulary)
+// so "connected"/"disconnected"/"scanning QR"/etc. never diverge between
+// the two pages. Deliberately does not poll (unlike SessionsPage's
+// post-mutation settle-poller) — this card is read-only, so there's no
+// mutation to settle after; a plain fetch-once-on-mount, refreshed like
+// every other Dashboard card only on a full page reload.
+function SessionsCard({ sessionName, query }: { sessionName: string; query: ReturnType<typeof useApiQuery<SessionStatus>> }) {
+  return (
+    <Card className="wa-metric-card">
+      <div className="wa-health-card__icon wa-health-card__icon--blue-deep">
+        <Smartphone size={20} strokeWidth={1.75} aria-hidden="true" />
+      </div>
+      <div className="wa-metric-card__body">
+        <div className="wa-health-card__title-row">
+          <p className="wa-health-card__title">WhatsApp Session</p>
+          {!sessionName ? null : query.status === 'success' ? (
+            <StatusBadge status={mapWahaStatus(query.data.status)} label={query.data.status ?? 'Unknown'} />
+          ) : query.status === 'error' ? (
+            <StatusBadge status="error" label="Unreachable" />
+          ) : null}
+        </div>
+        {!sessionName ? (
+          <EmptyState
+            icon={Smartphone}
+            title="No session configured"
+            description="Set VITE_WAHA_SESSION_NAME to enable session status."
+          />
+        ) : query.status === 'loading' ? (
+          <LoadingState label="Checking session…" />
+        ) : query.status === 'error' ? (
+          <p className="wa-health-card__detail">Could not reach this service.</p>
+        ) : (
+          <p className="wa-health-card__detail">{query.data.session}</p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 // Dashboard structure follows wamora-design-assets design spec Section 10
-// ("Row 1 — system health", "Row 2 — sessions + activity"). The spec's
-// Row 1 reference board also shows a Redis card — omitted because no
-// Redis health endpoint exists anywhere in the backend (checked
-// apps/core/urls.py directly); showing "Healthy" for a check that was
-// never made would be exactly the "fake successful API behavior" this
-// project's phases forbid. Row 2's "WhatsApp sessions summary" is left as
-// an explicit placeholder for the same reason: the Phase 8 data/UI audit
-// found WahaSession.status is not a reliable live source and true
-// multi-session summary needs BFF work the BFF doesn't have yet
-// (docs/generated/PHASE-8-DASHBOARD-DATA-UI-AUDIT-REPORT.md) — this is a
-// remaining, documented gap, not a silent omission.
+// ("Row 1 — system health", "Row 2 — sessions + activity"). Row 1's
+// Redis card (docs/generated/PHASE9-1C-REDIS-HEALTH-IMPLEMENTATION-REPORT.md,
+// PHASE9-1F-REDIS-DASHBOARD-IMPLEMENTATION-REPORT.md) reports only
+// whether the Celery broker Redis responds to PING — it says nothing
+// about Celery worker/beat liveness, a deliberately separate, unresolved
+// question (see the 9.1F design audit's Section 4 boundary). Row 2's
+// session card (docs/generated/NEXT-SESSIONS-CONNECTIVITY-IMPLEMENTATION-REPORT.md)
+// shows the single configured session's live WAHA status (Frontend -> BFF
+// -> WAHA, reusing SessionsPage.tsx's own getSessionStatus/mapWahaStatus)
+// — a true multi-session summary still needs further BFF work the BFF
+// doesn't have yet (docs/generated/PHASE-8-DASHBOARD-DATA-UI-AUDIT-REPORT.md),
+// a remaining, documented gap, not a silent omission.
 export function DashboardPage() {
   const wahaQuery = useApiQuery(async () => {
     const result = await getBffHealth();
@@ -179,8 +221,23 @@ export function DashboardPage() {
     return { ok: true, data: { ok: result.data.status === 'ok', detail: 'Connected' } };
   }, []);
 
+  const redisQuery = useApiQuery(async () => {
+    const result = await getRedisHealth();
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      data: {
+        ok: result.data.status === 'ok',
+        detail: result.data.status === 'ok' ? 'Connected' : 'Unreachable',
+      },
+    };
+  }, []);
+
   const messagesQuery = useApiQuery(() => getDashboardMessages(), []);
   const activityQuery = useApiQuery(() => getDashboardActivity(ACTIVITY_FEED_LIMIT), []);
+
+  const sessionName = config.wahaSessionName;
+  const sessionQuery = useApiQuery(() => getSessionStatus(sessionName), [sessionName]);
 
   return (
     <div>
@@ -190,24 +247,13 @@ export function DashboardPage() {
         <HealthCard icon={Wifi} tint="primary" title="WAHA" query={wahaQuery} />
         <HealthCard icon={Server} tint="blue" title="Backend (Django)" query={backendQuery} />
         <HealthCard icon={Database} tint="blue-deep" title="PostgreSQL" query={databaseQuery} />
+        <HealthCard icon={Zap} tint="primary" title="Redis" query={redisQuery} />
       </section>
 
       <section className="wa-dashboard__row2" aria-label="Messages, activity and sessions">
         <MessagesCard query={messagesQuery} />
         <ActivityCard query={activityQuery} />
-        <Card className="wa-metric-card">
-          <div className="wa-health-card__icon wa-health-card__icon--blue-deep">
-            <Smartphone size={20} strokeWidth={1.75} aria-hidden="true" />
-          </div>
-          <div className="wa-metric-card__body">
-            <p className="wa-health-card__title">WhatsApp Sessions</p>
-            <EmptyState
-              icon={Smartphone}
-              title="Not available yet"
-              description="A multi-session summary needs BFF work beyond this phase's scope — see the Phase 8 dashboard audit."
-            />
-          </div>
-        </Card>
+        <SessionsCard sessionName={sessionName} query={sessionQuery} />
       </section>
     </div>
   );

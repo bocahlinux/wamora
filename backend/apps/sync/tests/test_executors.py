@@ -5,6 +5,7 @@ from django.test import TestCase, override_settings
 
 from apps.chats.models import Chat, Message
 from apps.sync.executors import run_targeted_reconciliation_with_retry, trigger_reconciliation
+from apps.sync.models import SyncCheckpoint
 from apps.sync.tests.fixtures import REST_INBOUND_MESSAGE_1
 from apps.waha_sessions.models import WahaSession
 
@@ -76,6 +77,28 @@ class RunTargetedReconciliationWithRetryTests(TestCase):
         self.assertEqual(
             Message.objects.filter(provider_message_id=REST_INBOUND_MESSAGE_1['id']).count(), 1
         )
+
+    def test_records_targeted_trigger_source_and_given_task_id(self):
+        # docs/generated/NEXT-PHASE-RECONCILIATION-OBSERVABILITY-IMPLEMENTATION-REPORT.md.
+        # This helper is shared by both executors (module docstring) — its
+        # own trigger_source is always TRIGGER_TARGETED; task_id is
+        # whatever its caller passes (default '' for the sync executor).
+        client = SequentialStubWahaClient([[REST_INBOUND_MESSAGE_1]])
+        with mock.patch('apps.sync.executors.time.sleep'):
+            run_targeted_reconciliation_with_retry(
+                'test_session', '000000000000000@lid', waha_client=client, task_id='celery-task-id',
+            )
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.last_run_trigger_source, SyncCheckpoint.TRIGGER_TARGETED)
+        self.assertEqual(checkpoint.last_run_task_id, 'celery-task-id')
+
+    def test_task_id_defaults_to_blank_for_the_sync_executor(self):
+        client = SequentialStubWahaClient([[REST_INBOUND_MESSAGE_1]])
+        with mock.patch('apps.sync.executors.time.sleep'):
+            run_targeted_reconciliation_with_retry('test_session', '000000000000000@lid', waha_client=client)
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.last_run_trigger_source, SyncCheckpoint.TRIGGER_TARGETED)
+        self.assertEqual(checkpoint.last_run_task_id, '')
 
 
 @override_settings(RECONCILIATION_EXECUTOR='sync')

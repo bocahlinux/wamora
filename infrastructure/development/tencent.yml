@@ -1,0 +1,120 @@
+# Tencent Development — see docs/generated/PHASE-C-BFF-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md
+# and docs/generated/PHASE-C-BFF-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md.
+#
+# Development-only stack for the Tencent-side BFF: tsx watch (hot-reload),
+# built from the SAME, UNMODIFIED bff/Dockerfile already used by
+# infrastructure/tencent/docker-compose.yml — only the build `target`,
+# `command:`, and a source bind mount differ from that production file,
+# which this file does not touch, extend, or replace.
+#
+# Deliberately separate from infrastructure/development/office.yml
+# (Phase B) — no shared Docker network between the two, and no `backend`
+# service name reference. The BFF reaches the Office development stack's
+# Django container via its published host port
+# (http://host.docker.internal:8000, set in tencent.env), the same
+# explicit-URL boundary production itself uses (NetBird/LAN there) — see
+# the Phase C design report Section 6.
+#
+# `frontend` (Phase D — see
+# docs/generated/PHASE-D-FRONTEND-DEVELOPMENT-DOCKER-DESIGN-AUDIT-REPORT.md
+# and docs/generated/PHASE-D-FRONTEND-DEVELOPMENT-DOCKER-IMPLEMENTATION-REPORT.md)
+# joins `bff` here rather than a new file, mirroring production's own
+# grouping (infrastructure/tencent/docker-compose.yml already combines
+# frontend+bff+waha) — NOT because frontend and bff need to talk to each
+# other over Docker: they don't. The browser calls BFF/Django directly,
+# via full absolute URLs (VITE_BFF_BASE_URL/VITE_DJANGO_BASE_URL, baked
+# in by Vite from tencent.env below) — never through a proxy, never
+# through Docker networking. `frontend` shares no explicit network with
+# `bff` beyond Compose's own default per-project bridge, which neither
+# service's actual communication path depends on. WAHA is deliberately
+# NOT part of this file — see the design report Sections 9/11.
+#
+# Explicit `name:` below is required, not cosmetic: this file lives in
+# the same directory as infrastructure/development/office.yml, and
+# Docker Compose infers a project name from the project directory when
+# none is given — both files would otherwise default to the SAME project
+# name ("development"), which would silently merge this file's `bff`
+# service into office.yml's own network/project rather than keeping them
+# genuinely separate. Discovered during this phase's own verification,
+# not anticipated by the design audit — documented in the Phase C
+# implementation report.
+name: wamora-dev-tencent
+
+services:
+  bff:
+    build:
+      context: ../../bff
+      target: build
+    image: wamora-bff-dev
+    # Bypasses package.json's "dev" script deliberately (it runs
+    # `tsx watch --env-file-if-exists=.env src/index.ts`) — the
+    # `--env-file-if-exists=.env` flag would load a bind-mounted host
+    # bff/.env (if one exists, e.g. for bare-host dev) from inside this
+    # container too, which could unpredictably interact with the
+    # env_file: below. Compose's own env_file: already populates the
+    # container's environment before this command runs, exactly like the
+    # production Dockerfile's own CMD (`node dist/index.js`, no
+    # --env-file flag) already does — so this mirrors that same
+    # convention rather than relying on Node's flag inside Docker.
+    command: npx tsx watch src/index.ts
+    environment:
+      # tsx watch is chokidar-based internally; on some Docker Desktop /
+      # Windows bind-mount configurations, native filesystem change
+      # events do not propagate into the container even though file
+      # content/mtime sync correctly (discovered during this phase's own
+      # verification — see the Phase C implementation report). This is
+      # chokidar's own standard, built-in polling-fallback variable — not
+      # a new dependency, not a new tool, just a switch already
+      # understood by tsx's existing file-watcher.
+      CHOKIDAR_USEPOLLING: "true"
+    env_file:
+      - tencent.env
+    volumes:
+      - ../../bff:/app
+      - ${JWT_KEYS_HOST_PATH}:/run/secrets/wamora:ro
+      - /app/node_modules
+    ports:
+      - "8080:8080"
+    healthcheck:
+      # Uses the BFF's own existing GET /health (bff/src/routes/health.ts)
+      # — no new endpoint added. Node's built-in http client is used
+      # instead of curl/wget: node:22-alpine ships neither by default,
+      # and this avoids adding either as a new dependency just for the
+      # healthcheck.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://localhost:8080/health', r => process.exit(r.statusCode===200?0:1)).on('error', () => process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../../frontend
+      target: build
+    image: wamora-frontend-dev
+    # Bypasses `npm run dev` and calls `vite` directly, for the same
+    # explicit-invocation consistency as the `bff` service above (no
+    # flag-bypass reason here specifically — frontend's own "dev" script
+    # is just "vite", no extra flags to avoid).
+    command: npx vite
+    environment:
+      # Same Docker-Desktop/Windows bind-mount file-watch gap already
+      # found and fixed for `bff` (Phase C) — confirmed during the Phase
+      # D design audit that Vite's own bundled watcher (vendored inside
+      # the `vite` package itself, not a separate top-level dependency)
+      # recognizes this same standard variable. Not a new dependency.
+      CHOKIDAR_USEPOLLING: "true"
+    env_file:
+      - tencent.env
+    volumes:
+      - ../../frontend:/app
+      - ${JWT_KEYS_HOST_PATH}:/run/secrets/wamora:ro
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    restart: unless-stopped

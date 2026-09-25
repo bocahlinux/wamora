@@ -79,7 +79,7 @@ class ReconcileSessionTaskTests(TestCase):
         with mock.patch('apps.sync.tasks.reconcile_session', wraps=None) as mocked:
             from apps.sync.reconciliation import reconcile_session as real_reconcile_session
 
-            mocked.side_effect = lambda session_name, limit=100, max_pages=10: real_reconcile_session(
+            mocked.side_effect = lambda session_name, limit=100, max_pages=10, **kwargs: real_reconcile_session(
                 session_name, limit=limit, max_pages=max_pages, waha_client=client
             )
             reconcile_session_task.delay('test_session')
@@ -93,7 +93,7 @@ class ReconcileSessionTaskTests(TestCase):
     def test_rerunning_task_does_not_duplicate_durable_records(self):
         client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1]})
 
-        def call_real(session_name, limit=100, max_pages=10):
+        def call_real(session_name, limit=100, max_pages=10, **kwargs):
             from apps.sync.reconciliation import reconcile_session as real_reconcile_session
 
             return real_reconcile_session(session_name, limit=limit, max_pages=max_pages, waha_client=client)
@@ -120,6 +120,21 @@ class ReconcileSessionTaskTests(TestCase):
             with self.assertRaises(Retry):
                 reconcile_session_task.delay('test_session')
         mocked.assert_called_once()
+
+    def test_records_periodic_trigger_source_and_real_task_id(self):
+        # docs/generated/NEXT-PHASE-RECONCILIATION-OBSERVABILITY-IMPLEMENTATION-REPORT.md.
+        client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1]})
+        with mock.patch('apps.sync.tasks.reconcile_session', wraps=None) as mocked:
+            from apps.sync.reconciliation import reconcile_session as real_reconcile_session
+
+            mocked.side_effect = lambda session_name, limit=100, max_pages=10, **kwargs: real_reconcile_session(
+                session_name, limit=limit, max_pages=max_pages, waha_client=client, **kwargs
+            )
+            reconcile_session_task.delay('test_session')
+
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.last_run_trigger_source, SyncCheckpoint.TRIGGER_PERIODIC)
+        self.assertTrue(checkpoint.last_run_task_id)  # a real, non-empty Celery task id
 
     def test_retry_policy_is_bounded(self):
         self.assertEqual(reconcile_session_task.max_retries, 3)
@@ -164,7 +179,11 @@ class ReconcileChatTaskTests(TestCase):
 
             async_result = reconcile_chat_task.delay('test_session', '000000000000000@lid')
 
-        mocked.assert_called_once_with('test_session', '000000000000000@lid')
+        # task_id is the task's own real self.request.id (a fresh UUID per
+        # run) — asserted as "some string", not a specific value.
+        mocked.assert_called_once_with('test_session', '000000000000000@lid', task_id=mock.ANY)
+        self.assertIsInstance(mocked.call_args.kwargs['task_id'], str)
+        self.assertTrue(mocked.call_args.kwargs['task_id'])
         self.assertTrue(async_result.successful())
         payload = async_result.result
         self.assertEqual(payload['session_name'], 'test_session')
@@ -180,7 +199,7 @@ class ReconcileChatTaskTests(TestCase):
         with mock.patch('apps.sync.tasks.run_targeted_reconciliation_with_retry') as mocked:
             from apps.sync.executors import run_targeted_reconciliation_with_retry as real_helper
 
-            mocked.side_effect = lambda session_name, chat_id: real_helper(
+            mocked.side_effect = lambda session_name, chat_id, **kwargs: real_helper(
                 session_name, chat_id, waha_client=client
             )
             reconcile_chat_task.delay('test_session', '000000000000000@lid')
@@ -190,6 +209,20 @@ class ReconcileChatTaskTests(TestCase):
                 session=self.session, provider_message_id=REST_INBOUND_MESSAGE_1['id']
             ).exists()
         )
+
+    def test_records_targeted_trigger_source_and_real_task_id(self):
+        client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1]})
+        with mock.patch('apps.sync.tasks.run_targeted_reconciliation_with_retry') as mocked:
+            from apps.sync.executors import run_targeted_reconciliation_with_retry as real_helper
+
+            mocked.side_effect = lambda session_name, chat_id, **kwargs: real_helper(
+                session_name, chat_id, waha_client=client, **kwargs
+            )
+            reconcile_chat_task.delay('test_session', '000000000000000@lid')
+
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.last_run_trigger_source, SyncCheckpoint.TRIGGER_TARGETED)
+        self.assertTrue(checkpoint.last_run_task_id)  # a real, non-empty Celery task id
 
 
 @override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)
