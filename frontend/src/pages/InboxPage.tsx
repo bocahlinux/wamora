@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
-import { LogIn, MessageCircle, Paperclip, Send, Users, WifiOff } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { LogIn, MessageCircle, Paperclip, Send, TriangleAlert, Users, WifiOff } from 'lucide-react';
 
 import { Button } from '../components/ui/Button';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { LoadingState } from '../components/ui/LoadingState';
@@ -14,13 +15,26 @@ import {
   getChats,
   getSyncStatus,
   markChatRead,
+  recoverSyncCheckpoint,
   type ChatMessage,
   type ChatSummary,
   type SyncStatus,
 } from '../lib/djangoApi';
 import { config } from '../lib/config';
 import { useApiQuery } from '../lib/useApiQuery';
+import { useAuth } from '../lib/AuthContext';
 import './InboxPage.css';
+
+// Recovery scope gate (Phase 13.B) — reuses the EXISTING JWT scope string
+// "system administration" (backend: apps/authn/permissions.py
+// HasSystemAdministrationScope), which already gates
+// POST /api/sync/recover/:session/ server-side. Hiding the button for a
+// caller whose token lacks this scope is a UX courtesy only — the backend
+// remains the actual authorization boundary (lib/auth.ts's own
+// decodeToken() docstring: "the frontend must never make a security
+// decision based on this decoded value alone"). No new scope is
+// introduced anywhere.
+const SYSTEM_ADMINISTRATION_SCOPE = 'system administration';
 
 // Inbox/Chat (canonical Phase 8) — docs/generated/INBOX-CHAT-DECISION-REPORT.md.
 // Request paths, chosen there and reused as-is here:
@@ -141,6 +155,42 @@ export function InboxPage() {
   // LoadingState/ErrorState this feature doesn't need.
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
 
+  // Phase 13.B: pulled out of the polling useEffect below (unchanged
+  // otherwise) so the post-recovery refetch (handleRecoverConfirmed
+  // further down) can reuse this exact same read — no second/duplicate
+  // fetch implementation, no new polling loop.
+  const fetchSyncStatus = useCallback(async () => {
+    if (!sessionName) return;
+    const result = await getSyncStatus(sessionName);
+    if (result.ok) {
+      setSyncStatus(result.data);
+      reportPollOutcome(result);
+      return;
+    }
+    if (result.error.kind === 'not_found') {
+      // Django has never heard of this session name at all — not a
+      // connectivity problem (never fed into reportPollOutcome).
+      // Treated identically to a known session that simply hasn't been
+      // reconciled yet (design report Section 9).
+      setSyncStatus({
+        session: sessionName,
+        sync_status: 'never_synced',
+        checkpoint_status: null,
+        last_run_at: null,
+        seconds_since_last_run: null,
+        checkpoint_updated_at: null,
+        possibly_stuck: false,
+        last_webhook_received_at: null,
+      });
+      return;
+    }
+    // Connectivity-class failure — keep showing the last known sync
+    // status rather than blanking it, the same "freeze, don't blank"
+    // discipline the chat list/messages polls already use below.
+    reportPollOutcome(result);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionName]);
+
   useEffect(() => {
     // Reset immediately so a previous session's status is never shown
     // against a new session (defensive — config.wahaSessionName is a
@@ -149,38 +199,52 @@ export function InboxPage() {
     setSyncStatus(null);
     if (!sessionName) return undefined;
 
-    async function fetchSyncStatus() {
-      const result = await getSyncStatus(sessionName);
-      if (result.ok) {
-        setSyncStatus(result.data);
-        reportPollOutcome(result);
-        return;
-      }
-      if (result.error.kind === 'not_found') {
-        // Django has never heard of this session name at all — not a
-        // connectivity problem (never fed into reportPollOutcome).
-        // Treated identically to a known session that simply hasn't been
-        // reconciled yet (design report Section 9).
-        setSyncStatus({
-          session: sessionName,
-          sync_status: 'never_synced',
-          checkpoint_status: null,
-          last_run_at: null,
-          seconds_since_last_run: null,
-          checkpoint_updated_at: null,
-        });
-        return;
-      }
-      // Connectivity-class failure — keep showing the last known sync
-      // status rather than blanking it, the same "freeze, don't blank"
-      // discipline the chat list/messages polls already use below.
-      reportPollOutcome(result);
-    }
-
     fetchSyncStatus();
     const interval = setInterval(fetchSyncStatus, SYNC_STATUS_POLL_MS);
     return () => clearInterval(interval);
-  }, [sessionName]);
+  }, [sessionName, fetchSyncStatus]);
+
+  // ---- Reconciliation recovery (Phase 13.B) --------------------------------
+  // docs/generated/PHASE-13B-RECONCILIATION-DIAGNOSTICS-UI-DESIGN-AUDIT-REPORT.md
+  // Section 6/9. Visible only when possibly_stuck === true AND the caller's
+  // JWT carries the existing "system administration" scope (server-side
+  // authoritative gate unchanged: HasSystemAdministrationScope). Reuses
+  // ConfirmDialog (Section 6.3) and, on success, refetches sync status via
+  // fetchSyncStatus above rather than fabricating the resulting status
+  // locally (task requirement).
+  const { claims } = useAuth();
+  const canRecover = claims?.scopes.includes(SYSTEM_ADMINISTRATION_SCOPE) ?? false;
+
+  const [recoveryConfirmOpen, setRecoveryConfirmOpen] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryFeedback, setRecoveryFeedback] = useState<
+    { kind: 'success' } | { kind: 'error'; error: ApiError } | null
+  >(null);
+
+  async function handleRecoverConfirmed() {
+    if (!sessionName || recoveryBusy) return;
+    setRecoveryBusy(true);
+    setRecoveryFeedback(null);
+    const result = await recoverSyncCheckpoint(sessionName);
+    setRecoveryBusy(false);
+    setRecoveryConfirmOpen(false);
+    if (!result.ok) {
+      // Covers 401/403 (already-categorized by lib/api.ts), 404, the
+      // 409 concurrent_state_change / not_stale / not_running /
+      // no_checkpoint cases (all surfaced as ApiError.kind: 'validation'
+      // with the backend's own operator-appropriate message, per the
+      // design audit Section 6.6), and any generic failure — no new
+      // error-handling code, reuses the existing ErrorState/ApiError
+      // taxonomy verbatim. Never auto-retried, never auto-reissued.
+      setRecoveryFeedback({ kind: 'error', error: result.error });
+      return;
+    }
+    setRecoveryFeedback({ kind: 'success' });
+    // Refetch from the server rather than fabricating the resulting
+    // status locally (task requirement) — reuses the existing read, no
+    // new polling loop.
+    fetchSyncStatus();
+  }
 
   // ---- Chat list --------------------------------------------------------
   const chatsQuery = useApiQuery(() => getChats(1), []);
@@ -309,10 +373,48 @@ export function InboxPage() {
         description="Conversations and messages"
         actions={
           syncStatus ? (
-            <StatusBadge status={mapSyncStatus(syncStatus.sync_status)} label={SYNC_STATUS_LABEL[syncStatus.sync_status]} />
+            <StatusBadge
+              status={mapSyncStatus(syncStatus.sync_status, syncStatus.possibly_stuck)}
+              label={SYNC_STATUS_LABEL[syncStatus.sync_status]}
+            />
           ) : null
         }
       />
+
+      {syncStatus?.possibly_stuck ? (
+        <div className="wa-inbox__sync-stuck" role="status">
+          <p className="wa-inbox__sync-stuck-text">
+            <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+            Reconciliation may be stuck — it has been running longer than expected. This is a diagnostic signal,
+            not confirmation that the run has failed.
+          </p>
+          {canRecover ? (
+            <Button variant="secondary" disabled={recoveryBusy} onClick={() => setRecoveryConfirmOpen(true)}>
+              Mark reconciliation as failed…
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {recoveryFeedback?.kind === 'success' ? (
+        <p className="wa-inbox__sync-recovery-feedback wa-inbox__sync-recovery-feedback--success" role="status">
+          Reconciliation for {sessionName} was marked as failed. A future reconciliation run can start cleanly.
+        </p>
+      ) : recoveryFeedback?.kind === 'error' ? (
+        <ErrorState error={recoveryFeedback.error} />
+      ) : null}
+
+      {sessionName ? (
+        <ConfirmDialog
+          open={recoveryConfirmOpen}
+          title={`Mark reconciliation for ${sessionName} as failed?`}
+          description="Reconciliation is only suspected to be stuck — this is based on how long it has been running, not proof the process has stopped. Confirming will mark the current run as failed so a future reconciliation can start cleanly; it will not start a new run automatically, and this cannot be undone. Only continue if you believe this run is no longer active."
+          confirmLabel="Mark as failed"
+          busy={recoveryBusy}
+          onCancel={() => setRecoveryConfirmOpen(false)}
+          onConfirm={handleRecoverConfirmed}
+        />
+      ) : null}
 
       {connectivityIssue ? (
         <p className="wa-inbox__connectivity" role="status">

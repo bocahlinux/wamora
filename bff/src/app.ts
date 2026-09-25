@@ -4,6 +4,7 @@ import express from 'express';
 import { config } from './config';
 import { buildCorsOptions } from './corsOptions';
 import healthRouter from './routes/health';
+import internalBlastRouter from './routes/internalBlast';
 import messagesRouter from './routes/messages';
 import sessionRouter from './routes/session';
 
@@ -19,6 +20,11 @@ export function createApp() {
   app.use(healthRouter);
   app.use('/api', sessionRouter);
   app.use('/api', messagesRouter);
+  // Office/Celery -> BFF internal dispatch (Phase 11 — Blast). Deliberately
+  // NOT under /api (the prefix every frontend-reachable route uses) and
+  // gated by requireOfficeDispatchKey only, never requireAuth/requireScope
+  // — see routes/internalBlast.ts's own docstring.
+  app.use('/internal', internalBlastRouter);
 
   return app;
 }

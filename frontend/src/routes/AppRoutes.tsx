@@ -1,5 +1,8 @@
 import { Route, Routes } from 'react-router-dom';
 
+import { BlastCreatePage } from '../pages/BlastCreatePage';
+import { BlastDetailPage } from '../pages/BlastDetailPage';
+import { BlastListPage } from '../pages/BlastListPage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { InboxPage } from '../pages/InboxPage';
 import { LoginPage } from '../pages/LoginPage';
@@ -46,6 +49,30 @@ export function AppRoutes() {
         element={
           <ProtectedRoute>
             <SessionsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/blast"
+        element={
+          <ProtectedRoute>
+            <BlastListPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/blast/new"
+        element={
+          <ProtectedRoute>
+            <BlastCreatePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/blast/:id"
+        element={
+          <ProtectedRoute>
+            <BlastDetailPage />
           </ProtectedRoute>
         }
       />

@@ -32,3 +32,17 @@ class HasSystemAdministrationScope(BasePermission):
         if not claims:
             return False
         return 'system administration' in claims.get('scopes', [])
+
+
+class HasBlastScope(BasePermission):
+    """Phase 11 (Blast) — same shape as HasReadingScope/
+    HasSystemAdministrationScope, for the 'blast' scope (already declared
+    in settings.JWT_SCOPES/docs/06-SECURITY.md, but never checked by any
+    endpoint before this — docs/generated/PHASE-11-BLAST-DESIGN-AUDIT-REPORT.md
+    Section 7). No new scope name introduced."""
+
+    def has_permission(self, request, view):
+        claims = request.auth
+        if not claims:
+            return False
+        return 'blast' in claims.get('scopes', [])

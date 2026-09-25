@@ -70,8 +70,17 @@ export function mapWahaStatus(raw: string | undefined): StatusKind {
  * anywhere here says or implies "offline"/"disconnected"/"WhatsApp". Never
  * invents a status the backend didn't report — an unrecognized value
  * falls back to 'unknown' rather than guessing, same as the two mappers
- * above. */
-export function mapSyncStatus(raw: string | undefined): StatusKind {
+ * above.
+ *
+ * Phase 13.B — docs/generated/PHASE-13B-RECONCILIATION-DIAGNOSTICS-UI-DESIGN-AUDIT-REPORT.md
+ * Section 4: `possibly_stuck` is an optional, additive second argument (not
+ * a sixth `sync_status` value — the backend keeps that five-value contract
+ * unchanged). `possibly_stuck: true` only ever co-occurs with
+ * `sync_status: 'running'` (backend's own `_is_possibly_stuck()` guard),
+ * and is mutually exclusive with `stale`'s existing 'warning' tone, so
+ * reusing 'warning' here introduces no ambiguity. */
+export function mapSyncStatus(raw: string | undefined, possiblyStuck?: boolean): StatusKind {
+  if (raw === 'running' && possiblyStuck) return 'warning';
   switch (raw) {
     case 'healthy':
       return 'healthy';
@@ -83,6 +92,58 @@ export function mapSyncStatus(raw: string | undefined): StatusKind {
       return 'error';
     case 'never_synced':
       return 'unknown';
+    default:
+      return 'unknown';
+  }
+}
+
+/** Maps Phase 11 Blast's `BlastCampaign.status` (backend:
+ * apps/blast/models.py STATUS_CHOICES — the exact 7 values below, no
+ * others) into the same visual vocabulary as the mappers above. Never
+ * invents a status the backend didn't report. `rejected` and `failed` both
+ * use the 'error' StatusKind (same red tone) since both are negative
+ * terminal outcomes — the passed-through `label` (BlastListPage/
+ * BlastDetailPage always pass one) is what actually distinguishes them for
+ * the viewer, not the tone. */
+export function mapBlastCampaignStatus(raw: string | undefined): StatusKind {
+  switch (raw) {
+    case 'draft':
+      return 'unknown';
+    case 'pending_approval':
+      return 'starting';
+    case 'approved':
+      return 'healthy';
+    case 'sending':
+      return 'syncing';
+    case 'completed':
+      return 'healthy';
+    case 'rejected':
+      return 'error';
+    case 'failed':
+      return 'error';
+    default:
+      return 'unknown';
+  }
+}
+
+/** Maps Phase 11 Blast's `BlastRecipient.status` (backend:
+ * apps/blast/models.py STATUS_CHOICES — pending/sending/sent/failed/
+ * skipped) into the same visual vocabulary. `skipped` is reserved on the
+ * backend for a future cancel/resume feature (no code path sets it today,
+ * per that model's own docstring) but is mapped here too so the badge
+ * never falls through to 'unknown' if it ever appears. */
+export function mapBlastRecipientStatus(raw: string | undefined): StatusKind {
+  switch (raw) {
+    case 'pending':
+      return 'unknown';
+    case 'sending':
+      return 'syncing';
+    case 'sent':
+      return 'healthy';
+    case 'failed':
+      return 'error';
+    case 'skipped':
+      return 'offline';
     default:
       return 'unknown';
   }

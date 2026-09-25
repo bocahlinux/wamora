@@ -22,6 +22,41 @@
   color: var(--text-secondary);
 }
 
+/* Phase 13.B — reconciliation "possibly stuck" diagnostic signal + manual
+   recovery action (design audit Section 4/6). Same warning-chip formula as
+   .wa-inbox__connectivity/.wa-inbox__send-unknown above, reused rather than
+   inventing a new visual language. The recovery button (rendered only for
+   "system administration"-scoped callers) sits inside the same chip. */
+.wa-inbox__sync-stuck {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--text-secondary);
+}
+
+.wa-inbox__sync-stuck-text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--font-size-caption);
+}
+
+.wa-inbox__sync-recovery-feedback {
+  margin: 0 0 var(--space-4);
+  font-size: var(--font-size-caption);
+}
+
+.wa-inbox__sync-recovery-feedback--success {
+  color: var(--color-success);
+}
+
 .wa-inbox__panes {
   flex: 1;
   min-height: 0;

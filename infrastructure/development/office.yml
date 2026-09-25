@@ -18,6 +18,7 @@
 # BFF/frontend and WAHA are deliberately NOT part of this file — see the
 # design report Sections 11/14 for why they remain external to this
 # backend-only development stack.
+name: wamora-dev-office
 
 services:
   backend:

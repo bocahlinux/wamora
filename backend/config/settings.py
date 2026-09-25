@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'apps.webhooks',
     'apps.sync',
     'apps.operations',
+    'apps.blast',
     'apps.authn',
     'apps.dashboard',
     'corsheaders',
@@ -307,6 +308,29 @@ INTERNAL_SERVICE_KEY = os.environ.get('INTERNAL_SERVICE_KEY', '')
 # docs/generated/PHASE-6-FINAL-IMPLEMENTATION-CONTRACT.md Section 9: the
 # OutboundOperation staleness/retry-eligibility threshold — approved default.
 OUTBOUND_OPERATION_STALE_SECONDS = int(os.environ.get('OUTBOUND_OPERATION_STALE_SECONDS', '30'))
+
+
+# Phase 11 (Blast) — docs/generated/PHASE-11-BLAST-DESIGN-AUDIT-REPORT.md,
+# docs/11-DECISIONS-AND-OPEN-QUESTIONS.md item 12, and this phase's
+# finalized-decisions implementation prompt (overrides some of the design
+# audit's own defaults — see apps/blast/limits.py's module docstring).
+BLAST_MAX_RECIPIENTS_PER_CAMPAIGN = int(os.environ.get('BLAST_MAX_RECIPIENTS_PER_CAMPAIGN', '100'))
+BLAST_MAX_RECIPIENTS_PER_SESSION_PER_DAY = int(os.environ.get('BLAST_MAX_RECIPIENTS_PER_SESSION_PER_DAY', '500'))
+BLAST_INTER_MESSAGE_DELAY_SECONDS = int(os.environ.get('BLAST_INTER_MESSAGE_DELAY_SECONDS', '60'))
+
+# Office/Celery -> Tencent/BFF internal dispatch call (finalized decision
+# 1) — a NEW call direction, authenticated by a NEW, distinct shared
+# secret from INTERNAL_SERVICE_KEY above (that one authenticates the
+# OPPOSITE direction, BFF -> Django). Same fail-closed handling class as
+# every other secret on this page: environment-only, never committed,
+# empty by default. Must match OFFICE_DISPATCH_SERVICE_KEY on the BFF
+# side (bff/.env.example).
+OFFICE_DISPATCH_SERVICE_KEY = os.environ.get('OFFICE_DISPATCH_SERVICE_KEY', '')
+# Reaches the BFF over the same NetBird/LAN link DJANGO_INTERNAL_BASE_URL
+# (bff/.env.example) already uses in the opposite direction — see
+# docs/13-FINAL-DEPLOYMENT-TOPOLOGY.md.
+BFF_INTERNAL_BASE_URL = os.environ.get('BFF_INTERNAL_BASE_URL', '')
+BFF_INTERNAL_TIMEOUT_MS = int(os.environ.get('BFF_INTERNAL_TIMEOUT_MS', '10000'))
 
 
 # Django REST Framework

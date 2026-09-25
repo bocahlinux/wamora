@@ -170,6 +170,15 @@ export interface SyncStatus {
   last_run_at: string | null;
   seconds_since_last_run: number | null;
   checkpoint_updated_at: string | null;
+  // Phase 13.B — docs/generated/PHASE-13B-RECONCILIATION-DIAGNOSTICS-UI-DESIGN-AUDIT-REPORT.md
+  // Section 4/3. Both already returned by SyncStatusView today; the type
+  // was simply stale relative to the backend response until this change.
+  // `possibly_stuck` is a heuristic signal (see mapSyncStatus below), not
+  // proof a run has failed. `last_webhook_received_at` is included for
+  // type accuracy only — no UI in this phase renders it (no existing,
+  // established place in InboxPage.tsx it naturally belongs).
+  possibly_stuck: boolean;
+  last_webhook_received_at: string | null;
 }
 
 /** GET /api/sync/status/:session/ — a session that Django doesn't know
@@ -180,4 +189,194 @@ export function getSyncStatus(session: string) {
   return request<SyncStatus>(`${config.djangoBaseUrl}/api/sync/status/${encodeURIComponent(session)}/`, {
     headers: authHeader(),
   });
+}
+
+export interface SyncCheckpointRecoveryResult {
+  recovered: boolean;
+  previous_status: string;
+  status: string;
+}
+
+/** POST /api/sync/recover/:session/ — manual, human-triggered recovery
+ * (Phase 13.A: backend/apps/sync/views.py SyncCheckpointRecoveryView).
+ * Frontend -> Django direct, same as getSyncStatus above — never routed
+ * through the BFF (docs/generated/PHASE-13B-RECONCILIATION-DIAGNOSTICS-UI-DESIGN-AUDIT-REPORT.md
+ * Section 2.1). Server-side authorization (`IsAuthenticated` +
+ * `HasSystemAdministrationScope`) is the actual security boundary; the
+ * caller (InboxPage.tsx) hiding the triggering button for non-admin users
+ * is a UX courtesy only, not the enforcement mechanism. Does not enqueue
+ * a replacement reconciliation run — marks the current run as failed so a
+ * future run can start cleanly. */
+export function recoverSyncCheckpoint(session: string) {
+  return request<SyncCheckpointRecoveryResult>(
+    `${config.djangoBaseUrl}/api/sync/recover/${encodeURIComponent(session)}/`,
+    { method: 'POST', headers: authHeader() },
+  );
+}
+
+// Blast (Phase 11) — backend/apps/blast/{models,serializers,views,urls}.py,
+// mounted at /api/blast/ (backend/config/urls.py). Frontend -> Django
+// direct, same trust boundary as Inbox/Chat and sync-status above (these
+// are JWTAuthentication endpoints for a logged-in human's browser, not
+// BFF-internal traffic) — see apps/blast/views.py's own module docstring.
+//
+// Every field below is taken verbatim from the real serializers, not the
+// design audit narrative:
+//   - BlastRecipientSerializer (serializers.py:9-13): id, destination,
+//     status, scheduled_for, sent_at, failure_reason — all read-only.
+//   - BlastCampaignListSerializer (serializers.py:70-84): id, session
+//     (session name string, not an FK id), name, status, recipient_count
+//     (a SerializerMethodField — NOT a stored column), created_by/
+//     approved_by (usernames), approved_at, created_at, updated_at.
+//   - BlastCampaignDetailSerializer (serializers.py:87-91) extends the
+//     list serializer with message_template, rejected_reason, recipients.
+//   - BlastCampaignCreateSerializer (serializers.py:16-67): request body
+//     is {session (name string), name, message_template, recipients
+//     (string[] of destinations, max BLAST_MAX_RECIPIENTS_PER_CAMPAIGN)};
+//     response is the *detail* shape (views.py:83).
+//   - BlastCampaignRejectSerializer (serializers.py:94-95): reason is
+//     OPTIONAL (default ''), not required — the reject UI below must not
+//     force one.
+// There is no stored `idempotency_key` field (models.py:11-16 — it's a
+// derived @property, never serialized) and no submitted/sending/
+// completed/failed timestamp columns on BlastCampaign (models.py:71-86
+// only has created_at/updated_at from TimeStampedModel plus approved_at)
+// — the frontend only shows created_at/approved_at/updated_at, never a
+// fabricated per-transition timestamp.
+
+export type BlastCampaignStatus =
+  | 'draft'
+  | 'pending_approval'
+  | 'approved'
+  | 'sending'
+  | 'completed'
+  | 'rejected'
+  | 'failed';
+
+export type BlastRecipientStatus = 'pending' | 'sending' | 'sent' | 'failed' | 'skipped';
+
+export interface BlastRecipient {
+  id: number;
+  destination: string;
+  status: BlastRecipientStatus;
+  scheduled_for: string | null;
+  sent_at: string | null;
+  failure_reason: string;
+}
+
+export interface BlastCampaignListItem {
+  id: number;
+  session: string;
+  name: string;
+  status: BlastCampaignStatus;
+  recipient_count: number;
+  created_by: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BlastCampaignDetail extends BlastCampaignListItem {
+  message_template: string;
+  rejected_reason: string;
+  recipients: BlastRecipient[];
+}
+
+/** GET /api/blast/campaigns/ — readable by either the 'blast' scope
+ * (creators need to see their own campaigns) or 'system administration'
+ * (approvers need to see everything pending approval); no query params —
+ * the backend returns every campaign, newest-first (views.py:66-69). */
+export function getBlastCampaigns() {
+  return request<BlastCampaignListItem[]>(`${config.djangoBaseUrl}/api/blast/campaigns/`, {
+    headers: authHeader(),
+  });
+}
+
+/** GET /api/blast/campaigns/:id/ — same read-access rule as the list. */
+export function getBlastCampaign(id: number) {
+  return request<BlastCampaignDetail>(`${config.djangoBaseUrl}/api/blast/campaigns/${id}/`, {
+    headers: authHeader(),
+  });
+}
+
+export interface CreateBlastCampaignInput {
+  session: string;
+  name: string;
+  message_template: string;
+  recipients: string[];
+}
+
+/** POST /api/blast/campaigns/ — creates a `draft` campaign (requires the
+ * 'blast' scope). Recipient de-duplication and the
+ * BLAST_MAX_RECIPIENTS_PER_CAMPAIGN cap are enforced server-side
+ * (serializers.py:45-58); the frontend's own cap check is a UX courtesy
+ * only, matching this codebase's existing discipline (e.g. Inbox/
+ * Sessions' scope-gated buttons). Returns the detail shape. */
+export function createBlastCampaign(input: CreateBlastCampaignInput) {
+  return request<BlastCampaignDetail>(`${config.djangoBaseUrl}/api/blast/campaigns/`, {
+    method: 'POST',
+    body: input,
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/blast/campaigns/:id/submit/ — draft -> pending_approval.
+ * Restricted server-side to the campaign's own creator (views.py:119-120,
+ * a 403 'forbidden' ApiError otherwise). */
+export function submitBlastCampaign(id: number) {
+  return request<BlastCampaignDetail>(`${config.djangoBaseUrl}/api/blast/campaigns/${id}/submit/`, {
+    method: 'POST',
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/blast/campaigns/:id/approve/ — pending_approval -> approved,
+ * requires 'system administration'; server-side also rejects the
+ * campaign's own creator (403) and a campaign whose recipient count would
+ * exceed the session's remaining daily budget (409 'daily_budget_exceeded',
+ * views.py:161-179 — surfaced here as an ApiError.kind: 'validation' with
+ * the backend's own message, per the existing 400/409 -> 'validation'
+ * mapping in lib/api.ts). Triggers dispatch scheduling server-side; this
+ * call itself never touches BFF/WAHA. */
+export function approveBlastCampaign(id: number) {
+  return request<BlastCampaignDetail>(`${config.djangoBaseUrl}/api/blast/campaigns/${id}/approve/`, {
+    method: 'POST',
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/blast/campaigns/:id/reject/ — pending_approval -> rejected,
+ * requires 'system administration'. `reason` is OPTIONAL server-side
+ * (BlastCampaignRejectSerializer: allow_blank, default '') — always sent,
+ * possibly empty, never required client-side either. */
+export function rejectBlastCampaign(id: number, reason: string) {
+  return request<BlastCampaignDetail>(`${config.djangoBaseUrl}/api/blast/campaigns/${id}/reject/`, {
+    method: 'POST',
+    body: { reason },
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/blast/campaigns/:id/recipients/:recipientId/resolve/ — Phase
+ * 11 stuck-recovery fix (docs/generated/PHASE-11-BLAST-STUCK-RECOVERY-IMPLEMENTATION-REPORT.md):
+ * manually transitions a `sending` recipient (worker died after the WAHA
+ * send but before the final status write — never self-healing, per
+ * decision 6) to a terminal status the admin has determined externally.
+ * Requires 'system administration'. Compare-and-set server-side
+ * (views.py's BlastRecipientResolveView) — a 409 'not_sending' or
+ * 'concurrent_state_change' ApiError if the recipient already moved on.
+ * Never calls the BFF/WAHA client (a pure status write). Returns the
+ * updated campaign detail, same shape as approve/reject, so the campaign
+ * can finalize to completed/failed in the same response if this was its
+ * last in-flight recipient. */
+export function resolveBlastRecipient(campaignId: number, recipientId: number, status: 'sent' | 'failed') {
+  return request<BlastCampaignDetail>(
+    `${config.djangoBaseUrl}/api/blast/campaigns/${campaignId}/recipients/${recipientId}/resolve/`,
+    {
+      method: 'POST',
+      body: { status },
+      headers: authHeader(),
+    },
+  );
 }

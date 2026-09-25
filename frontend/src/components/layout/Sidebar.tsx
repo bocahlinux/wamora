@@ -1,4 +1,4 @@
-import { BarChart3, Inbox, LayoutDashboard, MessageCircle, PanelLeftClose, PanelLeftOpen, Settings, Smartphone, User } from 'lucide-react';
+import { BarChart3, Inbox, LayoutDashboard, Megaphone, MessageCircle, PanelLeftClose, PanelLeftOpen, Settings, Smartphone, User } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 
 import { Logo } from '../brand/Logo';
@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { to: '/whatsapp', label: 'WhatsApp', icon: MessageCircle, end: false },
   { to: '/inbox', label: 'Inbox', icon: Inbox, end: false },
   { to: '/sessions', label: 'Sessions', icon: Smartphone, end: false },
+  { to: '/blast', label: 'Blast', icon: Megaphone, end: false },
   { to: '/reports', label: 'Reports', icon: BarChart3, end: false },
   { to: '/settings', label: 'Settings', icon: Settings, end: false },
 ] as const;

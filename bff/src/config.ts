@@ -58,4 +58,13 @@ export const config = {
   // observed hanging in prior live-verification rounds — see
   // docs/generated/PHASE-6-BLOCKER-RESOLUTION.md).
   wahaTimeoutMs: Number(process.env.WAHA_TIMEOUT_MS ?? 10000),
+
+  // Office/Celery -> Tencent/BFF internal dispatch endpoint (Phase 11 —
+  // Blast). A NEW, distinct shared secret from internalServiceKey above
+  // (that one authenticates the OPPOSITE direction, BFF -> Django) —
+  // authenticates the Office-side Celery worker for exactly one narrow,
+  // allowlisted route (routes/internalBlast.ts). Never accepted from a
+  // browser/frontend JWT. Must match OFFICE_DISPATCH_SERVICE_KEY on the
+  // backend/.env side.
+  officeDispatchServiceKey: process.env.OFFICE_DISPATCH_SERVICE_KEY ?? '',
 };
