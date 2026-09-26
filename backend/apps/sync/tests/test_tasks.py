@@ -140,6 +140,45 @@ class ReconcileSessionTaskTests(TestCase):
         self.assertEqual(reconcile_session_task.max_retries, 3)
         self.assertEqual(reconcile_session_task.autoretry_for, (Exception,))
 
+    # -- is_final_attempt retry-exhaustion mechanics (this task) ------------
+    # PHASE-4-9-CELERY-WORKER-LIVENESS-IMPLEMENTATION-REPORT.md, closing the
+    # design audit's row-D FAIL: reconcile_session() must only write the
+    # checkpoint to a terminal STATUS_ERROR on an unhandled exception once
+    # Celery's own retries are truly exhausted, never on an intermediate
+    # attempt that is about to be retried. `push_request`/`pop_request`
+    # directly control `self.request.retries` without depending on Celery's
+    # own eager-mode retry simulation, which raises `Retry` rather than
+    # truly re-invoking synchronously (see test_task_failure_is_observable_
+    # not_silently_swallowed above) — the cleanest way to unit test the
+    # `self.request.retries >= self.max_retries` computation itself.
+
+    def test_first_attempt_is_not_final(self):
+        with mock.patch('apps.sync.tasks.reconcile_session') as mocked:
+            mocked.return_value = ReconciliationResult()
+            reconcile_session_task.delay('test_session')
+
+        self.assertFalse(mocked.call_args.kwargs['is_final_attempt'])
+
+    def test_intermediate_retry_attempt_is_not_marked_final(self):
+        reconcile_session_task.push_request(retries=1, id='fake-intermediate-attempt')
+        try:
+            with mock.patch('apps.sync.tasks.reconcile_session') as mocked:
+                mocked.return_value = ReconciliationResult()
+                reconcile_session_task.run('test_session')
+            self.assertFalse(mocked.call_args.kwargs['is_final_attempt'])
+        finally:
+            reconcile_session_task.pop_request()
+
+    def test_final_retry_attempt_is_marked_final(self):
+        reconcile_session_task.push_request(retries=reconcile_session_task.max_retries, id='fake-final-attempt')
+        try:
+            with mock.patch('apps.sync.tasks.reconcile_session') as mocked:
+                mocked.return_value = ReconciliationResult()
+                reconcile_session_task.run('test_session')
+            self.assertTrue(mocked.call_args.kwargs['is_final_attempt'])
+        finally:
+            reconcile_session_task.pop_request()
+
     def test_worker_style_redelivery_after_retry_eventually_succeeds(self):
         # Simulates what a real worker does on a retried task: re-invoke
         # the task body again later. Confirms that once the transient
@@ -181,7 +220,11 @@ class ReconcileChatTaskTests(TestCase):
 
         # task_id is the task's own real self.request.id (a fresh UUID per
         # run) — asserted as "some string", not a specific value.
-        mocked.assert_called_once_with('test_session', '000000000000000@lid', task_id=mock.ANY)
+        # is_final_attempt=False on this, the first (retries=0) attempt —
+        # PHASE-4-9-CELERY-WORKER-LIVENESS-IMPLEMENTATION-REPORT.md.
+        mocked.assert_called_once_with(
+            'test_session', '000000000000000@lid', task_id=mock.ANY, is_final_attempt=False,
+        )
         self.assertIsInstance(mocked.call_args.kwargs['task_id'], str)
         self.assertTrue(mocked.call_args.kwargs['task_id'])
         self.assertTrue(async_result.successful())
@@ -223,6 +266,31 @@ class ReconcileChatTaskTests(TestCase):
         checkpoint = SyncCheckpoint.objects.get(session=self.session)
         self.assertEqual(checkpoint.last_run_trigger_source, SyncCheckpoint.TRIGGER_TARGETED)
         self.assertTrue(checkpoint.last_run_task_id)  # a real, non-empty Celery task id
+
+    # -- is_final_attempt retry-exhaustion mechanics (this task) ------------
+    # Same reasoning as ReconcileSessionTaskTests's own block above — this
+    # task retries independently (its own autoretry_for/max_retries), so it
+    # needs its own coverage of the retries>=max_retries computation.
+
+    def test_intermediate_retry_attempt_is_not_marked_final(self):
+        reconcile_chat_task.push_request(retries=1, id='fake-intermediate-attempt')
+        try:
+            with mock.patch('apps.sync.tasks.run_targeted_reconciliation_with_retry') as mocked:
+                mocked.return_value = ReconciliationResult()
+                reconcile_chat_task.run('test_session', '000000000000000@lid')
+            self.assertFalse(mocked.call_args.kwargs['is_final_attempt'])
+        finally:
+            reconcile_chat_task.pop_request()
+
+    def test_final_retry_attempt_is_marked_final(self):
+        reconcile_chat_task.push_request(retries=reconcile_chat_task.max_retries, id='fake-final-attempt')
+        try:
+            with mock.patch('apps.sync.tasks.run_targeted_reconciliation_with_retry') as mocked:
+                mocked.return_value = ReconciliationResult()
+                reconcile_chat_task.run('test_session', '000000000000000@lid')
+            self.assertTrue(mocked.call_args.kwargs['is_final_attempt'])
+        finally:
+            reconcile_chat_task.pop_request()
 
 
 @override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)

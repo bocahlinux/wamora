@@ -51,6 +51,11 @@ def reconcile_session_task(self, session_name, limit=100, max_pages=10):
     result = reconcile_session(
         session_name, limit=limit, max_pages=max_pages,
         trigger_source=SyncCheckpoint.TRIGGER_PERIODIC, task_id=self.request.id,
+        # PHASE-4-9-CELERY-WORKER-LIVENESS-IMPLEMENTATION-REPORT.md: only
+        # the truly last attempt (no retries left) should write the
+        # checkpoint to a terminal STATUS_ERROR on an unexpected exception
+        # -- see reconcile_session()'s own `is_final_attempt` docstring.
+        is_final_attempt=self.request.retries >= self.max_retries,
     )
     logger.info(
         'reconcile_session_task session=%s chats_processed=%d messages_inserted=%d '
@@ -92,7 +97,11 @@ def reconcile_chat_task(self, session_name, chat_id):
     message, a different concern from that task's transient-failure
     safety net, and keeping them apart means neither's tests or behavior
     can accidentally affect the other."""
-    result = run_targeted_reconciliation_with_retry(session_name, chat_id, task_id=self.request.id)
+    result = run_targeted_reconciliation_with_retry(
+        session_name, chat_id, task_id=self.request.id,
+        # Same reasoning as reconcile_session_task above.
+        is_final_attempt=self.request.retries >= self.max_retries,
+    )
     logger.info(
         'reconcile_chat_task session=%s chat_id=%s messages_inserted=%d had_error=%s',
         session_name, chat_id, result.messages_inserted, result.had_error,

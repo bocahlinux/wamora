@@ -41,7 +41,7 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 1.5
 
 
-def run_targeted_reconciliation_with_retry(session_name, chat_id, waha_client=None, task_id=''):
+def run_targeted_reconciliation_with_retry(session_name, chat_id, waha_client=None, task_id='', is_final_attempt=True):
     """The one shared implementation of "reconcile this one chat, allowing
     for WAHA's REST history to lag slightly behind a just-accepted send".
     Called directly (in-process) by the `sync` executor below, and from
@@ -60,12 +60,23 @@ def run_targeted_reconciliation_with_retry(session_name, chat_id, waha_client=No
     targeted, single-chat path) — only task_id differs: the real Celery
     task ID from `reconcile_chat_task`'s own `self.request.id` for the
     `celery` executor, or '' (no Celery task exists) for the `sync`
-    executor, the default here."""
+    executor, the default here.
+
+    `is_final_attempt` — PHASE-4-9-CELERY-WORKER-LIVENESS-IMPLEMENTATION-REPORT.md.
+    Passed straight through to every `reconcile_session()` call below
+    unchanged — see that function's own docstring. Defaults to `True`,
+    correct for the `sync` executor (this module's own `EXECUTOR_SYNC`
+    branch calls this function with no Celery retry wrapping it at all,
+    so a raised exception here IS already the final attempt). Only
+    `reconcile_chat_task` (apps.sync.tasks, the `celery` executor's
+    Celery entry point) ever passes `False`, while its own
+    `autoretry_for` retries remain."""
     result = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         result = reconcile_session(
             session_name, chat_ids=[chat_id], waha_client=waha_client,
             trigger_source=SyncCheckpoint.TRIGGER_TARGETED, task_id=task_id,
+            is_final_attempt=is_final_attempt,
         )
         if result.messages_inserted > 0:
             return result

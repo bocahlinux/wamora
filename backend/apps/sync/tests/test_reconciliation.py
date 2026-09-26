@@ -1,11 +1,12 @@
 import copy
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.utils import timezone
 
 from apps.chats.models import Chat, Contact, Message
 from apps.sync.models import SyncCheckpoint
-from apps.sync.reconciliation import reconcile_session
+from apps.sync.reconciliation import SAFE_UNEXPECTED_ERROR_MESSAGE, reconcile_session
 from apps.sync.tests.fixtures import (
     REST_INBOUND_MESSAGE_1,
     REST_INBOUND_MESSAGE_2,
@@ -351,6 +352,64 @@ class ReconciliationCheckpointTests(TestCase):
         self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_OK)
         self.assertNotEqual(checkpoint.checkpoint_value, '')
         self.assertEqual(Message.objects.filter(session=self.session).count(), 2)
+
+    # -- is_final_attempt / unhandled-exception terminal write (this task) --
+    # PHASE-4-9-CELERY-WORKER-LIVENESS-IMPLEMENTATION-REPORT.md, closing the
+    # design audit's row-D FAIL: an exception that is neither WahaClientError
+    # nor MessageParsingError used to propagate straight out of this
+    # function, skipping the terminal write and leaving the checkpoint
+    # RUNNING forever. `persist_message` is mocked to raise a plain
+    # exception carrying sensitive-looking text, simulating "a bug in
+    # persist_message" (the audit's own example) — proving both that the
+    # checkpoint reaches STATUS_ERROR and that the raw exception text never
+    # leaks into last_error.
+
+    def test_unhandled_exception_on_final_attempt_marks_checkpoint_error_with_safe_message(self):
+        client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1]})
+        with patch(
+            'apps.sync.reconciliation.persist_message',
+            side_effect=KeyError('raw internal detail that must never leak'),
+        ):
+            with self.assertRaises(KeyError):
+                # is_final_attempt defaults to True — correct for this
+                # direct call (no Celery retry wraps it).
+                reconcile_session('test_session', waha_client=client)
+
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_ERROR)
+        self.assertEqual(checkpoint.last_error, 'Reconciliation failed due to an unexpected error.')
+        self.assertNotIn('raw internal detail', checkpoint.last_error)
+        self.assertEqual(checkpoint.checkpoint_value, '')  # never advanced
+        self.assertIsNotNone(checkpoint.last_run_at)
+
+    def test_unhandled_exception_with_retries_remaining_does_not_prematurely_mark_error(self):
+        # The trickiest part: while is_final_attempt=False (a Celery retry
+        # is still pending for this same task), the checkpoint must NOT be
+        # written to STATUS_ERROR — it stays exactly as write (A), at the
+        # top of this same call, already left it: RUNNING. The next retry
+        # attempt re-enters this function from the top and re-writes
+        # RUNNING again regardless, so nothing here needs to anticipate
+        # that — it only needs to not jump the gun.
+        client = StubWahaClient({'000000000000000@lid': [REST_INBOUND_MESSAGE_1]})
+        with patch('apps.sync.reconciliation.persist_message', side_effect=KeyError('boom')):
+            with self.assertRaises(KeyError):
+                reconcile_session('test_session', waha_client=client, is_final_attempt=False)
+
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_RUNNING)
+        self.assertEqual(checkpoint.last_error, '')
+
+    def test_waha_client_error_path_is_unaffected_by_is_final_attempt(self):
+        # Existing, already-correct WahaClientError handling (per-chat,
+        # never escapes to the new outer except) must behave identically
+        # regardless of is_final_attempt — this fix only adds a new path
+        # for exceptions that were NOT already handled.
+        client = StubWahaClient(failing_chats={'000000000000000@lid'})
+        result = reconcile_session('test_session', waha_client=client, is_final_attempt=False)
+
+        self.assertTrue(result.had_error)
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_ERROR)
 
 
 class ReconciliationCrossPathConsistencyTests(TestCase):

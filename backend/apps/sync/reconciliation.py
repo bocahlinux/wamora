@@ -52,6 +52,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_MESSAGE_LIMIT = 100
 DEFAULT_MAX_PAGES = 10
 
+# PHASE-4-9-CELERY-WORKER-LIVENESS-IMPLEMENTATION-REPORT.md. Never the raw
+# exception text (matches apps.blast.tasks.SAFE_FAILURE_MESSAGE's own
+# precedent) — a single, generic, operator-safe string for the one class of
+# failure this function's own code does not already know how to describe
+# more specifically: an exception that is not WahaClientError (which keeps
+# its own already-safe, already-specific str(exc) message below, unchanged)
+# and not MessageParsingError (same). Distinguishing these for an operator
+# is a documented future improvement, not this fix's scope.
+SAFE_UNEXPECTED_ERROR_MESSAGE = 'Reconciliation failed due to an unexpected error.'
+
 
 class ReconciliationResult:
     def __init__(self):
@@ -160,6 +170,7 @@ def reconcile_session(
     waha_client=None,
     trigger_source=None,
     task_id=None,
+    is_final_attempt=True,
 ):
     """Reconciles the given session's already-known chats (all of them, or
     only `chat_ids` if provided) against WAHA REST history. Never marks the
@@ -182,7 +193,48 @@ def reconcile_session(
     completion, so the metadata is already durably visible even if this
     run never reaches its own end — this is purely descriptive metadata:
     it never changes checkpoint_value, retry behavior, or the
-    reconciliation loop itself."""
+    reconciliation loop itself.
+
+    `is_final_attempt` — PHASE-4-9-CELERY-WORKER-LIVENESS-IMPLEMENTATION-REPORT.md.
+    Closes the one gap the design audit found: an exception that is
+    neither WahaClientError (handled per-chat below, unchanged) nor
+    MessageParsingError (also handled per-chat, unchanged) used to
+    propagate straight out of this function, skipping the terminal write
+    at the bottom entirely and leaving the checkpoint RUNNING forever.
+    Such an exception is now caught (see the `except Exception` below)
+    and, if `is_final_attempt` is true, the checkpoint is written to its
+    terminal STATUS_ERROR *before* the exception is re-raised — the
+    caller (Celery, or whatever else called this function) still sees
+    the original exception exactly as before; only the checkpoint's own
+    fate changes.
+
+    Defaults to `True` because that is the correct behavior for every
+    caller that is NOT wrapped in Celery's own `autoretry_for` retry
+    loop — the `sync` executor (apps.sync.executors), the
+    `manage.py reconcile` management command, and every existing test in
+    this module: for those callers, a raised exception here IS already
+    the final attempt (nothing will call this function again on their
+    behalf), so the checkpoint must reach STATUS_ERROR immediately, not
+    stay RUNNING waiting for a retry that will never come.
+
+    The two Celery entry points that DO retry
+    (`reconcile_session_task`/`reconcile_chat_task` in apps.sync.tasks,
+    both `autoretry_for=(Exception,), max_retries=3`) instead pass
+    `is_final_attempt=self.request.retries >= self.max_retries` — false
+    while a retry is still pending, true only on the actually-final
+    attempt. This matters because Celery's autoretry wrapper re-invokes
+    the ENTIRE task function from scratch on each retry, which re-enters
+    this function from the top and immediately re-writes the checkpoint
+    to RUNNING via write (A) above — so an intermediate failed attempt's
+    checkpoint state is about to be overwritten within moments anyway;
+    writing STATUS_ERROR for it here would be both premature (the retry
+    may well succeed) and misleading (surfacing a transient "error" for
+    what is, from the operator's point of view, still a healthy,
+    in-progress retry-backoff sequence — the same legitimate-retry false-
+    positive risk the design audit already documented for
+    `possibly_stuck`, row H). Only once retries are truly exhausted does
+    this function's own STATUS_ERROR write become the correct, final,
+    durable answer."""
     session = WahaSession.objects.get(name=session_name)
     checkpoint, _ = SyncCheckpoint.objects.get_or_create(session=session)
 
@@ -216,41 +268,65 @@ def reconcile_session(
     if chat_ids is not None:
         chats = chats.filter(provider_chat_id__in=chat_ids)
 
-    for chat in chats:
-        chat_fetch_failed = False
-        try:
-            for page in _iter_chat_history_pages(
-                client, session.name, chat.provider_chat_id, limit, max_pages, stop_at_timestamp
-            ):
-                for raw_message in page:
-                    try:
-                        parsed = parse_message(raw_message)
-                    except MessageParsingError as exc:
-                        result.messages_failed += 1
-                        result.message_errors.append(str(exc))
-                        logger.warning(
-                            'Reconciliation could not parse a message in chat %s: %s',
-                            chat.provider_chat_id, exc,
-                        )
-                        continue
+    try:
+        for chat in chats:
+            chat_fetch_failed = False
+            try:
+                for page in _iter_chat_history_pages(
+                    client, session.name, chat.provider_chat_id, limit, max_pages, stop_at_timestamp
+                ):
+                    for raw_message in page:
+                        try:
+                            parsed = parse_message(raw_message)
+                        except MessageParsingError as exc:
+                            result.messages_failed += 1
+                            result.message_errors.append(str(exc))
+                            logger.warning(
+                                'Reconciliation could not parse a message in chat %s: %s',
+                                chat.provider_chat_id, exc,
+                            )
+                            continue
 
-                    try:
-                        with transaction.atomic():
-                            persist_message(session, parsed)
-                    except DuplicateMessage:
-                        result.messages_skipped_existing += 1
-                        continue
+                        try:
+                            with transaction.atomic():
+                                persist_message(session, parsed)
+                        except DuplicateMessage:
+                            result.messages_skipped_existing += 1
+                            continue
 
-                    result.messages_inserted += 1
-                    if latest_timestamp is None or parsed.timestamp > latest_timestamp:
-                        latest_timestamp = parsed.timestamp
-        except WahaClientError as exc:
-            chat_fetch_failed = True
-            result.chat_fetch_errors.append(f'{chat.provider_chat_id}: {exc}')
-            logger.warning('Reconciliation fetch failed for chat %s: %s', chat.provider_chat_id, exc)
+                        result.messages_inserted += 1
+                        if latest_timestamp is None or parsed.timestamp > latest_timestamp:
+                            latest_timestamp = parsed.timestamp
+            except WahaClientError as exc:
+                chat_fetch_failed = True
+                result.chat_fetch_errors.append(f'{chat.provider_chat_id}: {exc}')
+                logger.warning('Reconciliation fetch failed for chat %s: %s', chat.provider_chat_id, exc)
 
-        if not chat_fetch_failed:
-            result.chats_processed += 1
+            if not chat_fetch_failed:
+                result.chats_processed += 1
+    except Exception:
+        # Anything reaching here is, by construction, NOT a WahaClientError
+        # (caught per-chat immediately above) and NOT a MessageParsingError
+        # (caught per-message immediately above) — an exception this
+        # function's own code does not already know how to handle: a bug,
+        # an unexpected DB error, an IntegrityError not converted to
+        # DuplicateMessage, etc. (design audit row D). See `is_final_attempt`
+        # in this function's own docstring for the retry-exhaustion
+        # reasoning below.
+        if is_final_attempt:
+            checkpoint.last_run_at = timezone.now()
+            checkpoint.status = SyncCheckpoint.STATUS_ERROR
+            checkpoint.last_error = SAFE_UNEXPECTED_ERROR_MESSAGE
+            # checkpoint_value is deliberately left untouched — same
+            # "only advances on a fully successful run" guarantee the
+            # existing had_error branch below already honors.
+            checkpoint.save(update_fields=['status', 'last_run_at', 'last_error', 'updated_at'])
+        # Re-raised unchanged either way: Celery's own autoretry_for still
+        # needs to see the original exception to decide whether to retry
+        # (when is_final_attempt is False) or mark the task FAILURE (when
+        # True) — this function only ever adds a checkpoint write, never
+        # swallows or replaces the exception itself.
+        raise
 
     checkpoint.last_run_at = timezone.now()
     if result.had_error:
