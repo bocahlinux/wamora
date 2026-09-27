@@ -21,10 +21,16 @@ the general 'anon' 60/minute) is the only limit that should apply here;
 stacking the general anon throttle on top would add no additional
 protection (the stricter one always binds first) and would only make the
 two limits' interaction harder to reason about.
+
+Also mixes in `FailOpenOnCacheErrorMixin` (Phase 13 Track B Finding 1,
+HIGH) so a Redis outage does not turn the login endpoint into a 500 —
+see apps.core.throttling for the rationale.
 """
 
 from rest_framework.throttling import AnonRateThrottle
 
+from apps.core.throttling import FailOpenOnCacheErrorMixin
 
-class LoginRateThrottle(AnonRateThrottle):
+
+class LoginRateThrottle(FailOpenOnCacheErrorMixin, AnonRateThrottle):
     scope = 'login'

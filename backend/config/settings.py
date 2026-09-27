@@ -95,9 +95,20 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
+    # apps.core listed before django.contrib.staticfiles so its own
+    # management/commands/runserver.py (Phase 13 Track B Finding 2,
+    # MEDIUM) is the one Django's command loader resolves for `runserver`
+    # — Django's get_commands() resolves same-named commands in favor of
+    # whichever app appears EARLIEST in INSTALLED_APPS, and staticfiles
+    # ships its own runserver override too. apps.core's override itself
+    # subclasses staticfiles' Command (not django.core's directly), so
+    # staticfiles' own runserver behavior (serving static files in DEBUG)
+    # is preserved unchanged; apps.core has no models/migrations that
+    # depend on ordering relative to contenttypes/sessions/messages, so
+    # this move has no other effect.
+    'apps.core',
     'django.contrib.staticfiles',
     'rest_framework',
-    'apps.core',
     'apps.waha_sessions',
     'apps.audit',
     'apps.chats',
@@ -418,8 +429,11 @@ REST_FRAMEWORK = {
     # `authn.LoginView` does, below, with a much stricter login-specific
     # rate — see apps/authn/throttling.py).
     'DEFAULT_THROTTLE_CLASSES': [
-        'rest_framework.throttling.AnonRateThrottle',
-        'rest_framework.throttling.UserRateThrottle',
+        # Phase 13 Track B Finding 1 (HIGH) — apps.core.throttling's
+        # fail-open variants, so a Redis outage does not turn into a
+        # 500 on every DRF endpoint (see that module's docstring).
+        'apps.core.throttling.SafeAnonRateThrottle',
+        'apps.core.throttling.SafeUserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
         # Deliberately generous circuit-breaker defaults, not a tight

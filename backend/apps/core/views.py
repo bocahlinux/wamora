@@ -26,10 +26,16 @@ class LivenessView(APIView):
     database — office backend being up and PostgreSQL being reachable are
     distinct signals (docs/01-ARCHITECTURE.md "Failure isolation",
     docs/CLAUDE.md offline rule: office backend/database offline are
-    reported separately)."""
+    reported separately).
+
+    Also exempt from DRF's default throttling (Phase 13 Track B Finding 1,
+    HIGH): the default throttle classes use the Redis-backed cache, so
+    without this exemption a Redis outage would 500 the one endpoint
+    that exists to report backend liveness during exactly that outage."""
 
     authentication_classes = []
     permission_classes = []
+    throttle_classes = []
 
     def get(self, request):
         return Response({'status': 'ok', 'component': 'backend'})
@@ -38,10 +44,16 @@ class LivenessView(APIView):
 class DatabaseHealthView(APIView):
     """Reports PostgreSQL reachability, independent of backend liveness.
     Never returns raw driver error text (may contain host/user details) —
-    see docs/06-SECURITY.md log redaction requirement."""
+    see docs/06-SECURITY.md log redaction requirement.
+
+    Also exempt from DRF's default throttling (Phase 13 Track B Finding 1,
+    HIGH) — see LivenessView; the general throttle classes are already
+    made fail-open for the normal case, but this health endpoint should
+    not depend on the throttle cache at all."""
 
     authentication_classes = []
     permission_classes = []
+    throttle_classes = []
 
     def get(self, request):
         try:
@@ -67,10 +79,16 @@ class RedisHealthView(APIView):
     Does NOT call `celery.control.ping()` or any Celery worker-inspection
     API, and does NOT infer or imply that a reachable Redis means a
     Celery worker is alive — those remain separate, unresolved questions
-    (docs/generated/PHASE9-1C-DESIGN-AUDIT-REPORT.md Section 10)."""
+    (docs/generated/PHASE9-1C-DESIGN-AUDIT-REPORT.md Section 10).
+
+    Also exempt from DRF's default throttling (Phase 13 Track B Finding 1,
+    HIGH) — see LivenessView. Without this, a Redis outage would 500 the
+    one endpoint that exists to report that exact outage, even though
+    this view's own logic never touches the cache backend."""
 
     authentication_classes = []
     permission_classes = []
+    throttle_classes = []
 
     def get(self, request):
         try:
