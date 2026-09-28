@@ -13,7 +13,10 @@ For every task:
 - run tests/lint/type-check;
 - report files changed, tests, limitations.
 
-Do not generate the entire system in one pass. Follow `15-CODING-PHASES.md`.
+Do not generate the entire system in one pass. Current phase status and
+what to work on next is tracked in `16-MASTER-ROADMAP.md` (canonical,
+22-phase) — `15-CODING-PHASES.md` is the original engineering sequence,
+kept for history but no longer the current authority.
 
 Do not create PostgreSQL container, expose secrets, or make frontend call WAHA directly.
 

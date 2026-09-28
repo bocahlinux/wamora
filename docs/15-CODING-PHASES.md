@@ -1,5 +1,11 @@
 # Coding Phases
 
+> **Historical document.** This was the original engineering roadmap.
+> The current, canonical WAMORA product roadmap is the 22-phase sequence
+> in [`16-MASTER-ROADMAP.md`](16-MASTER-ROADMAP.md), which supersedes the
+> phase statuses below. This file is kept unchanged for historical
+> reference and is not the current authority.
+
 0. Repository skeleton
 1. Backend foundation
 2. Database models + migrations

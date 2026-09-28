@@ -84,36 +84,22 @@ docker compose -f infrastructure/development/office.yml exec backend python mana
 
 ## Current status
 
-Progress follows the coding-phase roadmap in
-[`docs/15-CODING-PHASES.md`](docs/15-CODING-PHASES.md). Detailed design
-audits and implementation reports for each phase are written to
-[`docs/generated/`](docs/generated/) as work lands.
+WAMORA follows a canonical 22-phase development roadmap. The current,
+authoritative phase-by-phase status — what's complete, in progress, not
+started, or deferred — is maintained in
+[`docs/16-MASTER-ROADMAP.md`](docs/16-MASTER-ROADMAP.md). That document
+supersedes the original engineering sequence in
+[`docs/15-CODING-PHASES.md`](docs/15-CODING-PHASES.md) (kept as a
+historical record, not deleted) and any individual report under
+[`docs/generated/`](docs/generated/), which can go stale as work
+continues past the point a given report was written.
 
-| Phase | Status |
-|---|---|
-| 0–8 — Skeleton, backend/frontend foundation, data model, webhook ingestion, reconciliation, Celery/Redis, BFF, Inbox/chat | Complete |
-| 9 — Offline/degraded mode | Complete — connectivity/sync-status indication is consistent across Inbox, Dashboard and Sessions |
-| 10 — Session management | Complete |
-| 11 — Blast (controlled bulk send) | Complete — campaign draft/approval workflow, per-session throttled dispatch, `OutboundOperation`-based idempotency, manual stuck-recipient recovery |
-| 12 — Security hardening | In progress — see [`docs/generated/PHASE-12-SECURITY-HARDENING-DESIGN-AUDIT-REPORT.md`](docs/generated/PHASE-12-SECURITY-HARDENING-DESIGN-AUDIT-REPORT.md) |
-| 13 — Failure/security testing | Pending |
-| 14 — Production deployment | Pending |
-
-Recent notable work:
-- **Blast (Phase 11)**: campaign-based bulk WhatsApp send with admin
-  approval (no self-approval), a 60-second per-message throttle, a
-  100-recipient/campaign and 500-recipient/day/session cap (Asia/Jakarta
-  calendar day), and a manual recovery path for a recipient left stuck
-  mid-dispatch by a worker crash.
-- **Phase 9 completion**: reconciliation sync-status visibility and
-  connectivity-issue indication, previously Inbox-only, extended to the
-  Dashboard and Sessions pages.
-- **Phase 12 (security hardening, in progress)**: scope-gating on
-  under-permissioned read endpoints, fail-closed `DJANGO_SECRET_KEY`,
-  audit logging on login attempts, bounded login input, and rate limiting
-  (DRF throttling on the backend, `express-rate-limit` on the BFF, with a
-  stricter limit on the login endpoint).
-
-For the full, evidence-based status of every phase (including known,
-explicitly-tracked gaps), see
-[`docs/generated/PHASE-ROADMAP-STATUS-AUDIT-REPORT.md`](docs/generated/PHASE-ROADMAP-STATUS-AUDIT-REPORT.md).
+As of the last audit: the core platform (auth, WAHA session management,
+webhook ingestion, reconciliation, Inbox, multi-tenant Office model,
+security hardening, Blast) is complete; a superadmin-editable Dynamic
+RBAC system is functionally complete and verified but not yet committed;
+production-deployment hardening (TLS/reverse-proxy, image
+rollback/versioning, rate-limit resilience under a Redis/Postgres outage)
+is well underway with several items still open before a real go-live.
+See `docs/16-MASTER-ROADMAP.md` Section 2 for the full per-phase table
+with evidence, and Section 7 for the current actionable next steps.
