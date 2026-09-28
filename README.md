@@ -97,7 +97,7 @@ continues past the point a given report was written.
 As of the last audit: the core platform (auth, WAHA session management,
 webhook ingestion, reconciliation, Inbox, multi-tenant Office model,
 security hardening, Blast) is complete; a superadmin-editable Dynamic
-RBAC system is functionally complete and verified but not yet committed;
+RBAC system (canonical Phase 14) is complete and committed;
 production-deployment hardening (TLS/reverse-proxy, image
 rollback/versioning, rate-limit resilience under a Redis/Postgres outage)
 is well underway with several items still open before a real go-live.
