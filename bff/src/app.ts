@@ -11,6 +11,12 @@ import sessionRouter from './routes/session';
 
 export function createApp() {
   const app = express();
+  // Phase 14 Blocker B3 — opt-in only (config.trustProxy, default false);
+  // see config.ts's own comment for why this must stay off until the
+  // reverse-proxy service is confirmed to be the only path in.
+  if (config.trustProxy) {
+    app.set('trust proxy', 1);
+  }
   // Must run before the route handlers so preflight OPTIONS requests are
   // answered with the right headers (docs/generated/PHASE-7-CORS-FIX-REPORT.md)
   // — this is what was missing: CORS_ALLOWED_ORIGIN existed in config

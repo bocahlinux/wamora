@@ -1,0 +1,117 @@
+.wa-settings-tabs {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.wa-settings-tab {
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: none;
+  font-size: var(--font-size-body);
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.wa-settings-tab--active {
+  color: var(--text-primary);
+  border-bottom-color: var(--color-primary);
+  font-weight: 500;
+}
+
+.wa-settings-panel__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-3);
+  gap: var(--space-2);
+}
+
+.wa-settings-panel__title {
+  font-size: var(--font-size-h4);
+  font-weight: var(--font-weight-h4);
+  color: var(--text-primary);
+}
+
+.wa-settings-table-wrap {
+  overflow-x: auto;
+}
+
+.wa-settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-body-small);
+}
+
+.wa-settings-table th,
+.wa-settings-table td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-default);
+  white-space: nowrap;
+}
+
+.wa-settings-table th {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.wa-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: min(360px, 100%);
+}
+
+.wa-settings-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wa-settings-form__label {
+  font-size: var(--font-size-body-small);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.wa-settings-form__select,
+.wa-settings-form__input,
+.wa-settings-form__textarea {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--surface-default);
+  color: var(--text-primary);
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-body);
+}
+
+.wa-settings-form__textarea {
+  resize: vertical;
+  min-height: 72px;
+}
+
+.wa-settings-form__hint {
+  font-size: var(--font-size-caption);
+  color: var(--text-muted);
+}
+
+.wa-settings-form__error {
+  font-size: var(--font-size-caption);
+  color: var(--color-error);
+}
+
+.wa-settings-form__actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+.wa-settings-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}

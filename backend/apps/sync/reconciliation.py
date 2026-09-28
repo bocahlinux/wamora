@@ -156,7 +156,11 @@ def _discover_chats(client, session):
         if not isinstance(provider_chat_id, str) or not provider_chat_id:
             logger.warning('Skipping a discovered chat with no usable identifier for session %s', session.name)
             continue
-        _, created = Chat.objects.get_or_create(session=session, provider_chat_id=provider_chat_id)
+        # Step 9 (Inbox Office routing foundation) — same
+        # creation-time-only office copy as persist_message() below.
+        _, created = Chat.objects.get_or_create(
+            session=session, provider_chat_id=provider_chat_id, defaults={'office': session.office}
+        )
         if created:
             discovered += 1
     return discovered, None

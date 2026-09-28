@@ -80,12 +80,26 @@ export function BlastDetailPage() {
   }, [campaignQuery.status === 'success' ? campaignQuery.data : campaignQuery.status]);
 
   const isCreator = meQuery.status === 'success' && campaign !== null && meQuery.data.username === campaign.created_by;
+  const isSuperuser = meQuery.status === 'success' && meQuery.data.is_superuser;
   const canSubmit = (claims?.scopes.includes(BLAST_SCOPE) ?? false) && isCreator;
-  const canApprove = (claims?.scopes.includes(SYSTEM_ADMINISTRATION_SCOPE) ?? false) && !isCreator;
+  // Step 8 (Role x Scope alignment) — backend/apps/blast/views.py's
+  // Approve/Reject now accept EITHER the 'system administration' JWT
+  // scope OR apps.authn.permissions.HasOfficeAdminAccess (Office Admin/
+  // Global Admin by organizational role, deliberately WITHOUT the
+  // 'system administration' Group — see that permission class's own
+  // docstring for why). Mirrored here so the button isn't hidden from an
+  // Office/Global Admin who the backend will actually accept the request
+  // from; the server remains the authorization authority regardless.
+  const hasApprovalAuthority =
+    meQuery.status === 'success' &&
+    ((claims?.scopes.includes(SYSTEM_ADMINISTRATION_SCOPE) ?? false) ||
+      meQuery.data.has_global_access ||
+      meQuery.data.role === 'office_admin');
+  const canApprove = hasApprovalAuthority && (!isCreator || isSuperuser);
   // Reject has NO creator restriction server-side (backend/apps/blast/views.py
   // BlastCampaignRejectView — unlike ApproveView, it never checks
   // created_by_id), so this UI doesn't invent one either.
-  const canReject = claims?.scopes.includes(SYSTEM_ADMINISTRATION_SCOPE) ?? false;
+  const canReject = hasApprovalAuthority;
   // Phase 11 stuck-recovery fix (backend/apps/blast/views.py's
   // BlastRecipientResolveView) — same admin gate as approve/reject, no
   // creator restriction (recovering a stuck send is not a self-approval
@@ -201,6 +215,10 @@ export function BlastDetailPage() {
               <div>
                 <p className="wa-blast-detail__fact-label">Session</p>
                 <p className="wa-blast-detail__fact-value">{campaign.session}</p>
+              </div>
+              <div>
+                <p className="wa-blast-detail__fact-label">Office</p>
+                <p className="wa-blast-detail__fact-value">{campaign.office?.name ?? '—'}</p>
               </div>
               <div>
                 <p className="wa-blast-detail__fact-label">Recipients</p>

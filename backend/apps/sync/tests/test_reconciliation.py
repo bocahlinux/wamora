@@ -5,6 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.chats.models import Chat, Contact, Message
+from apps.offices.models import Office
 from apps.sync.models import SyncCheckpoint
 from apps.sync.reconciliation import SAFE_UNEXPECTED_ERROR_MESSAGE, reconcile_session
 from apps.sync.tests.fixtures import (
@@ -649,6 +650,26 @@ class ReconciliationChatDiscoveryTests(TestCase):
 
         self.assertEqual(result.chats_discovered, 1)
         self.assertTrue(Chat.objects.filter(session=self.session, provider_chat_id='new-chat@lid').exists())
+
+    def test_discovered_chat_gets_office_from_mapped_session(self):
+        # Step 9 (Inbox Office routing foundation).
+        office = Office.objects.create(name='Samsat Palangka Raya')
+        self.session.office = office
+        self.session.save(update_fields=['office'])
+        client = StubWahaClient(chats=[{'id': 'new-chat@lid'}])
+
+        reconcile_session('test_session', waha_client=client)
+
+        chat = Chat.objects.get(session=self.session, provider_chat_id='new-chat@lid')
+        self.assertEqual(chat.office, office)
+
+    def test_discovered_chat_office_stays_null_for_an_unmapped_session(self):
+        client = StubWahaClient(chats=[{'id': 'new-chat@lid'}])
+
+        reconcile_session('test_session', waha_client=client)
+
+        chat = Chat.objects.get(session=self.session, provider_chat_id='new-chat@lid')
+        self.assertIsNone(chat.office)
 
     def test_prefers_nested_info_chat_over_top_level_id(self):
         client = StubWahaClient(chats=[{'id': 'wrong@lid', '_data': {'Info': {'Chat': 'right@lid'}}}])

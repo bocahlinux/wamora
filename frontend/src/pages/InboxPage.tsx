@@ -6,18 +6,25 @@ import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { LoadingState } from '../components/ui/LoadingState';
+import { Modal } from '../components/ui/Modal';
 import { PageHeader } from '../components/ui/PageHeader';
 import { mapSyncStatus, StatusBadge } from '../components/ui/StatusBadge';
 import type { ApiError, ApiResult } from '../lib/api';
 import { sendMessage } from '../lib/bffApi';
 import {
+  assignChat,
   getChatMessages,
+  getChatOperators,
   getChats,
+  getMe,
   getSyncStatus,
   markChatRead,
   recoverSyncCheckpoint,
+  unassignChat,
+  updateOperatorAvailability,
   type ChatMessage,
   type ChatSummary,
+  type OperatorCandidate,
   type SyncStatus,
 } from '../lib/djangoApi';
 import { config } from '../lib/config';
@@ -246,6 +253,72 @@ export function InboxPage() {
     fetchSyncStatus();
   }
 
+  // ---- Operator assignment (Step 14 foundation) ----------------------------
+  // Backend (apps.authn.permissions.HasOfficeAdminAccess) remains the sole
+  // authority — `canManageAssignment` only decides whether to SHOW the
+  // controls, mirroring `canRecover` above's own established pattern.
+  const meQuery = useApiQuery(() => getMe(), []);
+  const canManageAssignment =
+    meQuery.status === 'success' && (meQuery.data.has_global_access || meQuery.data.role === 'office_admin');
+  const isOperator = meQuery.status === 'success' && meQuery.data.role === 'operator';
+
+  const [assignModalOpen, setAssignModalOpen] = useState(false);
+  const [operatorsState, setOperatorsState] = useState<
+    { status: 'loading' } | { status: 'success'; data: OperatorCandidate[] } | { status: 'error'; error: ApiError } | null
+  >(null);
+  const [assignBusy, setAssignBusy] = useState(false);
+  const [assignFeedback, setAssignFeedback] = useState<{ kind: 'error'; error: ApiError } | null>(null);
+
+  function applyAssignedTo(chatId: number, assignedTo: ChatSummary['assigned_to']) {
+    setChats((prev) => (prev ? prev.map((c) => (c.id === chatId ? { ...c, assigned_to: assignedTo } : c)) : prev));
+  }
+
+  async function openAssignModal() {
+    if (!selectedChat) return;
+    setAssignModalOpen(true);
+    setAssignFeedback(null);
+    setOperatorsState({ status: 'loading' });
+    const result = await getChatOperators(selectedChat.id);
+    setOperatorsState(result.ok ? { status: 'success', data: result.data } : { status: 'error', error: result.error });
+  }
+
+  async function handleAssign(userId: number) {
+    if (!selectedChat || assignBusy) return;
+    setAssignBusy(true);
+    setAssignFeedback(null);
+    const result = await assignChat(selectedChat.id, userId);
+    setAssignBusy(false);
+    if (!result.ok) {
+      setAssignFeedback({ kind: 'error', error: result.error });
+      return;
+    }
+    applyAssignedTo(selectedChat.id, result.data.assigned_to);
+    setAssignModalOpen(false);
+  }
+
+  async function handleUnassign() {
+    if (!selectedChat || assignBusy) return;
+    setAssignBusy(true);
+    const result = await unassignChat(selectedChat.id);
+    setAssignBusy(false);
+    if (!result.ok) return;
+    applyAssignedTo(selectedChat.id, null);
+  }
+
+  // ---- Self availability toggle (Step 14) — only for an actual Operator ---
+  // Current value always comes straight from /api/auth/me/'s own
+  // `is_available` (never guessed/defaulted locally) — refetched after a
+  // successful toggle so the displayed state always matches the server.
+  const [availabilityBusy, setAvailabilityBusy] = useState(false);
+
+  async function handleToggleAvailability() {
+    if (meQuery.status !== 'success' || availabilityBusy) return;
+    setAvailabilityBusy(true);
+    await updateOperatorAvailability(!meQuery.data.is_available);
+    setAvailabilityBusy(false);
+    meQuery.refetch();
+  }
+
   // ---- Chat list --------------------------------------------------------
   const chatsQuery = useApiQuery(() => getChats(1), []);
   const [chats, setChats] = useState<ChatSummary[] | null>(null);
@@ -372,12 +445,19 @@ export function InboxPage() {
         title="Inbox"
         description="Conversations and messages"
         actions={
-          syncStatus ? (
-            <StatusBadge
-              status={mapSyncStatus(syncStatus.sync_status, syncStatus.possibly_stuck)}
-              label={SYNC_STATUS_LABEL[syncStatus.sync_status]}
-            />
-          ) : null
+          <>
+            {isOperator ? (
+              <Button variant="secondary" disabled={availabilityBusy} onClick={handleToggleAvailability}>
+                {meQuery.status === 'success' && meQuery.data.is_available ? 'Available' : 'Unavailable'}
+              </Button>
+            ) : null}
+            {syncStatus ? (
+              <StatusBadge
+                status={mapSyncStatus(syncStatus.sync_status, syncStatus.possibly_stuck)}
+                label={SYNC_STATUS_LABEL[syncStatus.sync_status]}
+              />
+            ) : null}
+          </>
         }
       />
 
@@ -498,6 +578,28 @@ export function InboxPage() {
                       <span className="wa-inbox__conversation-subtitle">{chatDisplay(selectedChat).secondary}</span>
                     ) : null}
                   </span>
+                  {/* Step 14 (Operator assignment foundation) — backend
+                      (HasOfficeAdminAccess + can_view_chat) remains sole
+                      authority; canManageAssignment only decides display. */}
+                  <span className="wa-inbox__assignment">
+                    <span className="wa-inbox__assignment-label">
+                      {selectedChat.assigned_to
+                        ? `Assigned: ${selectedChat.assigned_to.first_name || selectedChat.assigned_to.username}`
+                        : 'Unassigned'}
+                    </span>
+                    {canManageAssignment ? (
+                      <>
+                        <Button variant="secondary" onClick={openAssignModal}>
+                          {selectedChat.assigned_to ? 'Reassign' : 'Assign'}
+                        </Button>
+                        {selectedChat.assigned_to ? (
+                          <Button variant="ghost" disabled={assignBusy} onClick={handleUnassign}>
+                            Unassign
+                          </Button>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </span>
                 </div>
 
                 <div className="wa-inbox__messages" ref={listRef}>
@@ -570,6 +672,32 @@ export function InboxPage() {
           </div>
         </div>
       )}
+
+      <Modal open={assignModalOpen} onClose={() => setAssignModalOpen(false)} title="Assign operator">
+        {operatorsState === null || operatorsState.status === 'loading' ? (
+          <LoadingState label="Loading operators…" />
+        ) : operatorsState.status === 'error' ? (
+          <ErrorState error={operatorsState.error} />
+        ) : operatorsState.data.length === 0 ? (
+          <EmptyState icon={Users} title="No available operators" description="No operator in this chat's Office is currently available." />
+        ) : (
+          <ul className="wa-inbox__operator-list">
+            {operatorsState.data.map((operator) => (
+              <li key={operator.id}>
+                <Button
+                  variant="secondary"
+                  disabled={assignBusy}
+                  onClick={() => handleAssign(operator.id)}
+                  className="wa-inbox__operator-option"
+                >
+                  {[operator.first_name, operator.last_name].filter(Boolean).join(' ') || operator.username}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {assignFeedback?.kind === 'error' ? <ErrorState error={assignFeedback.error} /> : null}
+      </Modal>
     </div>
   );
 }

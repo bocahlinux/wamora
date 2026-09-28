@@ -110,6 +110,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'apps.waha_sessions',
+    'apps.offices',
     'apps.audit',
     'apps.chats',
     'apps.webhooks',
@@ -466,14 +467,34 @@ REST_FRAMEWORK = {
 
 
 # Security headers / cookie hardening (docs/06-SECURITY.md).
-# SECURE_SSL_REDIRECT / HSTS are intentionally not set here: the TLS
-# termination point is still an open decision (docs/11-DECISIONS-AND-OPEN-QUESTIONS.md,
-# "TLS/domain") and forcing them now could break deployments before that is
-# decided. Revisit in the security-hardening / production-deployment phases.
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 X_FRAME_OPTIONS = 'DENY'
 SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# Phase 14 Blocker B3 (TLS/reverse proxy) — opt-in, defaults to False (no
+# behavior change from before this flag existed). SECURE_SSL_REDIRECT and
+# HSTS both rely on request.is_secure(), which by default only looks at
+# the actual socket, not any X-Forwarded-Proto header — so enabling
+# SECURE_PROXY_SSL_HEADER before a trusted reverse proxy is actually the
+# only way to reach this process would let a direct, untrusted caller
+# spoof "X-Forwarded-Proto: https" and have Django wrongly treat an
+# insecure connection as secure (Django's own documented caveat for this
+# setting). Only set DJANGO_BEHIND_TLS_PROXY=True once
+# infrastructure/tencent/docker-compose.yml's `reverse-proxy` service (or
+# an equivalent trusted proxy in front of this Office deployment) is
+# confirmed to be the sole path in, and is configured to set/overwrite
+# this header itself rather than forward a caller-supplied one. Bundled
+# together rather than three separate flags: all three only make sense
+# once that same precondition holds. Neither needs the real domain name —
+# SSL_REDIRECT/HSTS work against whatever Host header a request already
+# carries, not a hardcoded one (docs/11-DECISIONS-AND-OPEN-QUESTIONS.md's
+# "TLS/domain" item is about where TLS terminates, not about these).
+if os.environ.get('DJANGO_BEHIND_TLS_PROXY', 'False') == 'True':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 
 # Logging (docs/06-SECURITY.md: log redaction — never log secrets/credentials).

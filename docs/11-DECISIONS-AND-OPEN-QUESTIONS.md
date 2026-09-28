@@ -12,7 +12,7 @@
 9. Reconciliation mandatory after recovery.
 10. Frontend access restricted to LAN/NetBird.
 11. BFF stack: Node.js + TypeScript, Express.
-12. Blast limits: max 100 recipients/campaign; max 500 recipients/day/session; 60s delay between messages; dispatch must be queued/throttled; admin ("system administration" scope) approval required before dispatch.
+12. Blast limits: max 100 recipients/campaign; max 500 recipients/day/session; 60s delay between messages; dispatch must be queued/throttled; admin ("system administration" scope) approval required before dispatch. Approval always requires that scope. A Django `is_superuser` (SUPERADMIN) may approve their own campaign; a non-superuser creator may not self-approve, even if they hold the approval scope.
 
 ## Final — 2026-09-26, phase-labeling correction
 13. The "Phase 13.A"/"Phase 13.B" labels used across ~10 `docs/generated/`

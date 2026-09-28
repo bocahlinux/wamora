@@ -1,6 +1,8 @@
+from django.conf import settings
 from django.db import models
 
 from apps.core.models import TimeStampedModel
+from apps.offices.models import Office
 from apps.waha_sessions.models import WahaSession
 
 
@@ -21,6 +23,14 @@ class Contact(TimeStampedModel):
 
 class Chat(TimeStampedModel):
     session = models.ForeignKey(WahaSession, on_delete=models.PROTECT, related_name='chats')
+    # Step 5 (Inbox <-> Office integration) — nullable, PROTECT, same
+    # nullability/on_delete decision as BlastCampaign.office (Step 4):
+    # existing Chat rows have no Office to backfill to, and no automatic
+    # backfill is performed (apps/chats/authorization.py's own docstring
+    # explains the resulting visibility consequence).
+    office = models.ForeignKey(
+        Office, on_delete=models.PROTECT, null=True, blank=True, related_name='chats'
+    )
     provider_chat_id = models.CharField(max_length=128)
     contact = models.ForeignKey(
         Contact, on_delete=models.SET_NULL, null=True, blank=True, related_name='chats'
@@ -39,6 +49,26 @@ class Chat(TimeStampedModel):
     # WAHA read/seen integration can populate this same field without an
     # API/UI contract change.
     last_read_at = models.DateTimeField(null=True, blank=True)
+    # Step 13 (Inbox welcome lifecycle) — nullable, stamped exactly once,
+    # the moment the welcome message is actually sent for this Chat (never
+    # pre-emptively, never retroactively for a Chat that already existed
+    # before this field did — no backfill). Doubles as the idempotency
+    # guard: `Chat.objects.filter(pk=..., welcome_sent_at__isnull=True)
+    # .update(...)` (apps/chats/inbox_lifecycle.py) is the sole compare-
+    # and-set claim that lets at most one concurrent webhook delivery for
+    # the same Chat actually send it — same discipline as every other
+    # state-changing write in this project (apps.blast.views, apps.sync.views).
+    welcome_sent_at = models.DateTimeField(null=True, blank=True)
+    # Step 14 (Operator assignment & availability foundation) — current
+    # assignment only, not a history table (deliberately out of this
+    # step's scope). `on_delete=SET_NULL` matches this same model's own
+    # `contact` field precedent above (never cascade-delete a Chat just
+    # because the assigned User row is removed) — an unassigned Chat is
+    # simply not lost from the Inbox, same reasoning as an unlinked
+    # Contact. No backfill: every existing Chat stays `assigned_to=NULL`.
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_chats'
+    )
 
     class Meta:
         constraints = [

@@ -20,6 +20,7 @@ from django.conf import settings
 from django.db import models
 
 from apps.core.models import TimeStampedModel
+from apps.offices.models import Office
 from apps.operations.models import OutboundOperation
 from apps.waha_sessions.models import WahaSession
 
@@ -69,6 +70,14 @@ class BlastCampaign(TimeStampedModel):
     }
 
     session = models.ForeignKey(WahaSession, on_delete=models.PROTECT, related_name='blast_campaigns')
+    # Step 4 (Office integration) — nullable: 5 pre-existing campaigns
+    # (audited, all created_by a superuser with no Office membership to
+    # infer one from) have no safe Office to backfill onto. NULL means
+    # "not Office-bound" and is treated as a distinct, deliberate case
+    # by apps.blast.authorization — not an error state, not backfilled.
+    office = models.ForeignKey(
+        Office, on_delete=models.PROTECT, null=True, blank=True, related_name='blast_campaigns'
+    )
     name = models.CharField(max_length=255)
     message_template = models.TextField()
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_DRAFT)

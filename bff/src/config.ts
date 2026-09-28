@@ -77,4 +77,17 @@ export const config = {
   // against a single WAHA session (docs/00-MASTER-SPEC.md), so this
   // exists to catch a genuine flood, not ordinary interactive use.
   rateLimitMaxPerMinute: Number(process.env.RATE_LIMIT_MAX_PER_MINUTE ?? 300),
+
+  // Phase 14 Blocker B3 (TLS/reverse proxy) — opt-in, defaults to false
+  // (today's behavior: Express trusts nothing but the raw TCP peer
+  // address, which is already correct when there is no proxy in front of
+  // the BFF). Only set TRUST_PROXY=true once
+  // infrastructure/tencent/docker-compose.yml's `reverse-proxy` service
+  // is actually the sole path a browser can reach this BFF through —
+  // trusting X-Forwarded-For/X-Forwarded-Proto from an untrusted direct
+  // caller would let it spoof its own IP and bypass
+  // middleware/rateLimit.ts's per-IP limit. Exactly 1 hop is trusted
+  // (matches the one reverse-proxy container in front, never more) —
+  // see https://expressjs.com/en/guide/behind-proxies.html.
+  trustProxy: process.env.TRUST_PROXY === 'true',
 };

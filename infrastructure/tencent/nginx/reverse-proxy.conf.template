@@ -1,0 +1,126 @@
+# Phase 14 Blocker B3 (TLS/reverse proxy) — this is the ONLY public
+# entrypoint for the Tencent side once this service is running: `frontend`
+# and `bff` no longer publish their own ports for browser traffic (bff's
+# own published port from Blocker B2 stays, but only for Office/Celery's
+# direct dispatch calls — see docker-compose.yml's own comment on that).
+#
+# Single hostname/cert (no server_name assumed — `$host` reflects
+# whatever the client actually requested; docs/11-DECISIONS-AND-OPEN-QUESTIONS.md's
+# "TLS/domain" item is about WHERE this terminates and which cert is
+# used, not about anything this file needs to hardcode). One origin
+# fronts frontend + BFF's browser-facing routes + Django's browser-facing
+# routes, so the frontend's existing VITE_BFF_BASE_URL/VITE_DJANGO_BASE_URL
+# can simply be set to '' (same-origin — frontend/src/lib/config.ts
+# already supports this: it only ever does `${baseUrl}/api/...`, so an
+# empty base URL yields a same-origin relative path) with ZERO frontend
+# code changes.
+#
+# This file is envsubst-templated by the official nginx image's own
+# startup mechanism (files under /etc/nginx/templates/*.template are
+# rendered to /etc/nginx/conf.d/ before nginx starts) — ${DJANGO_PROXY_UPSTREAM}
+# below is substituted from the reverse-proxy service's own environment
+# (infrastructure/tencent/.env, REQUIRED, no default — see .env.example).
+
+server {
+    listen 80 default_server;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+
+    # Operator-provided certificate (Let's Encrypt, an internal CA, or
+    # otherwise) — mounted read-only from a host path via
+    # TLS_CERT_PATH/TLS_KEY_PATH (docker-compose.yml), never generated or
+    # committed by this repository.
+    ssl_certificate     /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Docker's embedded DNS (127.0.0.11) — needed so proxy_pass targets
+    # below are resolved at REQUEST time via a variable, not once at
+    # config-load time. Without this, nginx refuses to even start if
+    # `bff`/`frontend` (or DJANGO_PROXY_UPSTREAM) aren't resolvable yet —
+    # observed directly while validating this file: `depends_on:
+    # service_started` only waits for the container to start, not for its
+    # DNS entry/listener to actually be ready, so a cold `docker compose
+    # up` could otherwise crash-loop this entire proxy. Using a variable
+    # instead means an unready upstream just 502s until it comes up.
+    resolver 127.0.0.11 valid=10s;
+
+    # Office/Celery -> BFF Blast dispatch (routes/internalBlast.ts) must
+    # NEVER be reachable through this public entrypoint — Office reaches
+    # BFF directly over its own published port instead (Blocker B2).
+    # Explicit deny, not left to fall through to the `location /` catch-all
+    # below: without this, /internal/* would silently be forwarded to
+    # `frontend` (discovered while validating this file — it 502'd there
+    # instead of being blocked, only "safe" because frontend's own static
+    # server happens to have no matching route, not because anything here
+    # actually denied it).
+    location /internal/ {
+        return 404;
+    }
+
+    # BFF — session control / send (bff/src/routes/session.ts, messages.ts).
+    # Deliberately excludes /internal (Office/Celery -> BFF Blast dispatch,
+    # routes/internalBlast.ts) — that path must never be reachable through
+    # this public entrypoint; Office already reaches BFF directly over its
+    # own published port (Blocker B2), not through this proxy.
+    #
+    # Every proxy_pass below uses a variable for the upstream (required
+    # for the resolver-based, crash-safe behavior above) but deliberately
+    # carries NO path segment after it — per nginx's own documented
+    # behavior, a variable proxy_pass with no URI part forwards the
+    # client's original request URI unchanged, which is exactly what's
+    # wanted here (BFF/Django's own routes already expect the full
+    # /api/... path). An earlier version of this file appended a literal
+    # path (e.g. `/api/`) after the variable, which nginx instead treats
+    # as "always forward exactly this literal path" — discovered directly
+    # while regression-testing this file for Phase 14 MISSING item M5:
+    # /api/auth/me/ and /api/dashboard/messages/ both landed upstream as
+    # bare /api/, silently dropping everything after it. Fixed here.
+    location /api/sessions/ {
+        set $bff_upstream http://bff:8080;
+        proxy_pass $bff_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location = /health {
+        set $bff_upstream http://bff:8080;
+        proxy_pass $bff_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Django — durable data/auth (backend/apps/*), reached over
+    # NetBird/LAN, not the Tencent Docker network — same boundary
+    # bff/src/config.ts's djangoInternalBaseUrl already crosses in the
+    # opposite direction. DJANGO_PROXY_UPSTREAM is REQUIRED (host:port,
+    # e.g. the Office server's NetBird address) — see .env.example.
+    location /api/ {
+        set $django_upstream http://${DJANGO_PROXY_UPSTREAM};
+        proxy_pass $django_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Frontend static SPA — everything else. SPA fallback for direct
+    # navigation/refresh on a client-side route (e.g. /dashboard, /inbox)
+    # is handled by frontend's OWN nginx config (frontend/nginx.conf,
+    # Phase 14 MISSING item M5) — this proxy just forwards the request
+    # unchanged, exactly like the BFF/Django locations above.
+    location / {
+        set $frontend_upstream http://frontend:80;
+        proxy_pass $frontend_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}

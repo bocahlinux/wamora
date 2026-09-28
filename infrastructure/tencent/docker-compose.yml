@@ -1,27 +1,127 @@
 # Tencent VPS — see docs/13-FINAL-DEPLOYMENT-TOPOLOGY.md
-# Flow: Browser -> Frontend -> BFF -> WAHA -> WhatsApp
-# Port access must be restricted at the network layer (LAN/NetBird),
+# Flow: Browser -> reverse-proxy (TLS) -> Frontend / BFF / Django -> WAHA -> WhatsApp
+# Port access must be restricted at the network layer (a VPN or
+# equivalent private network — not required to specifically be NetBird),
 # not by this file — see docs/06-SECURITY.md.
 
+# Phase 14 MISSING item M4 (log rotation) — same rationale/defaults as
+# infrastructure/office/docker-compose.yml's own copy of this anchor (kept
+# duplicated rather than shared: these are two independently-deployed
+# Compose projects on separate hosts, per docs/13-FINAL-DEPLOYMENT-TOPOLOGY.md).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-10m}"
+    max-file: "${LOG_MAX_FILES:-5}"
+
 services:
+  # Phase 14 Blocker B3 — the sole public HTTPS entrypoint. frontend/bff
+  # no longer publish browser-facing ports directly (see each service's
+  # own comment below); this terminates TLS and proxies internally over
+  # the Docker network. See nginx/reverse-proxy.conf.template for the
+  # full routing/rationale — none of this requires knowing the real
+  # domain (docs/11-DECISIONS-AND-OPEN-QUESTIONS.md's "TLS/domain" open
+  # item is about cert provisioning/where TLS terminates, not this file).
+  reverse-proxy:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/reverse-proxy.conf.template:/etc/nginx/templates/reverse-proxy.conf.template:ro
+      # Operator-provided cert/key files (Let's Encrypt, an internal CA,
+      # or otherwise) — REQUIRED, no default, never generated or
+      # committed by this repository. See .env.example.
+      - ${TLS_CERT_PATH:?Set TLS_CERT_PATH to the real certificate file (fullchain.pem) on the host — see infrastructure/tencent/.env.example}:/etc/nginx/tls/fullchain.pem:ro
+      - ${TLS_KEY_PATH:?Set TLS_KEY_PATH to the real private key file (privkey.pem) on the host — see infrastructure/tencent/.env.example}:/etc/nginx/tls/privkey.pem:ro
+    environment:
+      # Substituted into the *.template above by the nginx image's own
+      # startup envsubst step — REQUIRED, no default (the Office server's
+      # NetBird address:port for Django — see .env.example).
+      DJANGO_PROXY_UPSTREAM: ${DJANGO_PROXY_UPSTREAM:?Set DJANGO_PROXY_UPSTREAM to the Office server's NetBird address:port for Django — see infrastructure/tencent/.env.example}
+    ports:
+      # Same private/NetBird-only binding discipline as Blocker B2's
+      # BFF_BIND_ADDRESS — this is now the thing actually facing users,
+      # so it is the one port pair allowed to be reachable at all;
+      # REQUIRED, no default, never 0.0.0.0 or a public IP unless the
+      # operator has deliberately decided this VPS should be reachable
+      # from the open internet (decision #10, docs/11, currently says
+      # LAN/NetBird only).
+      - "${PROXY_BIND_ADDRESS:?Set PROXY_BIND_ADDRESS to the VPS's private/NetBird interface address — never 0.0.0.0 or a public IP unless deliberately decided otherwise. See infrastructure/tencent/.env.example}:80:80"
+      - "${PROXY_BIND_ADDRESS:?Set PROXY_BIND_ADDRESS to the VPS's private/NetBird interface address — never 0.0.0.0 or a public IP unless deliberately decided otherwise. See infrastructure/tencent/.env.example}:443:443"
+    depends_on:
+      - frontend
+      - bff
+    logging: *default-logging
+    restart: unless-stopped
+
   frontend:
+    # Phase 14 MISSING item M6 (rollback / image versioning) — IMAGE_TAG
+    # defaults to "local" (safe, no production value needed). See
+    # .env.example and docs/08-DEPLOYMENT.md's "Image versioning and
+    # rollback" section for the full tagging/rollback procedure
+    # (infrastructure/scripts/*.sh).
+    image: wamora-frontend:${IMAGE_TAG:-local}
     build:
       context: ../../frontend
-    ports:
-      - "80:80"
+      # Phase 14 Blocker B1 — Vite bakes these in at image-build time, not
+      # container-start time, so they must be build args (substituted from
+      # this file's own .env, the same one bff/waha use as env_file: below —
+      # a separate mechanism, see that file's own comments), not env_file:.
+      # None of these three is a secret (base URLs + a session name) — see
+      # frontend/.env.example / bff/.env.example for what must NEVER go here.
+      # Phase 14 Blocker B3 — in production, behind reverse-proxy, these
+      # should be '' (same-origin, see reverse-proxy.conf.template); they
+      # only need a full absolute URL for a setup with no reverse proxy.
+      args:
+        VITE_BFF_BASE_URL: ${VITE_BFF_BASE_URL}
+        VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
+        VITE_WAHA_SESSION_NAME: ${VITE_WAHA_SESSION_NAME}
+    # Phase 14 Blocker B3 — no longer published: the browser now reaches
+    # this only via reverse-proxy's `location /` (over the Docker
+    # network, http://frontend:80) — never directly. Removing this
+    # publish also closes the plain-HTTP bypass a still-published :80
+    # would otherwise leave around the new HTTPS-only public entrypoint.
     depends_on:
       - bff
+    logging: *default-logging
     restart: unless-stopped
 
   bff:
+    # Phase 14 MISSING item M6 (rollback / image versioning) — IMAGE_TAG
+    # defaults to "local". See .env.example and docs/08-DEPLOYMENT.md's
+    # "Image versioning and rollback" section (infrastructure/scripts/*.sh).
+    image: wamora-bff:${IMAGE_TAG:-local}
     build:
       context: ../../bff
     env_file:
       - .env
     ports:
-      - "8080:8080"
+      # Phase 14 Blocker B2 — BFF must never be reachable from the public
+      # internet (docs/06-SECURITY.md's "Current BFF network-exposure
+      # reality"; decision #10, docs/11: frontend/BFF access is restricted
+      # to LAN/NetBird). Binding to 0.0.0.0 (the old "8080:8080" form)
+      # publishes on every interface, including any public one the VPS
+      # has. BFF_BIND_ADDRESS is REQUIRED (no default — Compose fails the
+      # build/up with a clear message if unset, matching this project's
+      # existing fail-closed pattern) and must be set to the VPS's
+      # private/NetBird interface address, never 0.0.0.0 and never a
+      # public IP — see infrastructure/tencent/.env.example.
+      #
+      # Phase 14 Blocker B3 — this publish still exists ONLY for
+      # Office/Celery's own direct dispatch calls (routes/internalBlast.ts,
+      # via BFF_INTERNAL_BASE_URL on the backend side) — the BROWSER no
+      # longer reaches this port directly at all; it goes through
+      # reverse-proxy's `location /api/sessions/`/`/health` instead. TRUST_PROXY
+      # in .env must stay false unless this bff process is confirmed to
+      # only ever receive requests via that one trusted reverse-proxy hop
+      # (see bff/src/config.ts's own comment — Office's direct calls here
+      # do NOT go through the proxy, so leaving TRUST_PROXY on while this
+      # port is still reachable directly would let Office's own caller,
+      # or anyone else who can reach BFF_BIND_ADDRESS, spoof rate-limit
+      # identity; this port is NetBird-private, not internet-facing, but
+      # "private" is not the same trust level as "only the proxy").
+      - "${BFF_BIND_ADDRESS:?Set BFF_BIND_ADDRESS to the VPS's private/NetBird interface address — never 0.0.0.0 or a public IP. See infrastructure/tencent/.env.example}:8080:8080"
     depends_on:
       - waha
+    logging: *default-logging
     restart: unless-stopped
 
   waha:
@@ -31,6 +131,7 @@ services:
     volumes:
       - waha_sessions:/app/.sessions
       - waha_media:/app/.media
+    logging: *default-logging
     restart: unless-stopped
     # No published port: the BFF reaches WAHA over the internal Docker
     # network only (docs/06-SECURITY.md: "WAHA port should not be

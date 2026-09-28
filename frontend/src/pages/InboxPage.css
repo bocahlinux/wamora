@@ -190,6 +190,30 @@
   color: var(--text-muted);
 }
 
+.wa-inbox__assignment {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.wa-inbox__assignment-label {
+  font-size: var(--font-size-caption);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.wa-inbox__operator-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.wa-inbox__operator-option {
+  width: 100%;
+  justify-content: flex-start;
+}
+
 .wa-inbox__messages {
   flex: 1;
   min-height: 0;

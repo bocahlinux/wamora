@@ -19,6 +19,11 @@ class ChatListSerializer(serializers.ModelSerializer):
     # data.
     phone_number = serializers.SerializerMethodField()
     unread = serializers.SerializerMethodField()
+    # Step 14 (Operator assignment foundation) — minimal, non-sensitive
+    # identity only (id/username/first_name/last_name), same field
+    # allowlist as apps.chats.serializers.OperatorCandidateSerializer
+    # below, never anything from OfficeMembership itself.
+    assigned_to = serializers.SerializerMethodField()
 
     class Meta:
         model = Chat
@@ -32,6 +37,7 @@ class ChatListSerializer(serializers.ModelSerializer):
             'last_message_at',
             'last_read_at',
             'unread',
+            'assigned_to',
         ]
 
     def get_contact_name(self, obj):
@@ -43,6 +49,18 @@ class ChatListSerializer(serializers.ModelSerializer):
         # Same select_related('contact') as get_contact_name — no extra query.
         return obj.contact.phone_number if obj.contact_id and obj.contact.phone_number else None
 
+    def get_assigned_to(self, obj):
+        # Relies on the view's queryset using select_related('assigned_to').
+        if obj.assigned_to_id is None:
+            return None
+        user = obj.assigned_to
+        return {
+            'id': user.pk,
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+        }
+
     def get_unread(self, obj):
         # No message yet -> nothing to read. Never read -> unread once a
         # message exists. Otherwise: has a message arrived since the last
@@ -53,6 +71,23 @@ class ChatListSerializer(serializers.ModelSerializer):
         if obj.last_read_at is None:
             return True
         return obj.last_message_at > obj.last_read_at
+
+
+class OperatorCandidateSerializer(serializers.Serializer):
+    """GET /api/chats/:id/operators/ — minimal, non-sensitive identity
+    only (Step 14 Section 7's own explicit "jangan expose data
+    sensitif") — never email, never scope/claim data, never other
+    OfficeMembership rows."""
+
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    first_name = serializers.CharField()
+    last_name = serializers.CharField()
+    is_available = serializers.BooleanField()
+
+
+class AssignChatSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField()
 
 
 class MediaReferenceSerializer(serializers.ModelSerializer):

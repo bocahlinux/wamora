@@ -5,38 +5,69 @@
 # The backend connects to the EXISTING PostgreSQL via environment
 # variables in .env (DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD).
 
+# Phase 14 MISSING item M4 (log rotation) — Docker's default `json-file`
+# log driver has no size cap unless set, so a long-running production
+# container can fill the host's disk over time. LOG_MAX_SIZE/LOG_MAX_FILES
+# are optional (sane universal defaults below, not a production-specific
+# value — no real host/domain/cert info needed here), configurable via
+# .env if an operator wants to tune them. A YAML anchor (`x-` prefix is
+# ignored by Compose itself) so every service below shares one
+# definition instead of repeating it four times.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-10m}"
+    max-file: "${LOG_MAX_FILES:-5}"
+
+# Phase 14 MISSING item M6 (rollback / image versioning) — backend,
+# celery-worker, and celery-beat all run the SAME image (they only
+# differ by `command:`). Only `backend` has a `build:` section; the
+# other two deliberately have none and just reference the identical
+# `image:` name — confirmed via a standalone test that `docker compose
+# build` (or `build celery-worker` alone) cannot build them
+# independently ("No services to build" for the latter), so it is now
+# structurally impossible for these three to drift to different images,
+# closing the version-mismatch risk in
+# docs/generated/PHASE-14-M6-ROLLBACK-IMAGE-VERSIONING-AUDIT-REPORT.md
+# Section 3. IMAGE_TAG defaults to "local" (safe, no production value
+# needed) — see .env.example and docs/08-DEPLOYMENT.md's "Image
+# versioning and rollback" section for the full tagging/rollback
+# procedure (infrastructure/scripts/*.sh).
 services:
   backend:
     build:
       context: ../../backend
+    image: wamora-backend:${IMAGE_TAG:-local}
     env_file:
       - .env
     ports:
       - "8000:8000"
     depends_on:
       - redis
+    logging: *default-logging
     restart: unless-stopped
 
   celery-worker:
-    build:
-      context: ../../backend
+    image: wamora-backend:${IMAGE_TAG:-local}
     command: celery -A config worker -l info
     env_file:
       - .env
     depends_on:
       - redis
+    logging: *default-logging
     restart: unless-stopped
 
   celery-beat:
-    build:
-      context: ../../backend
+    image: wamora-backend:${IMAGE_TAG:-local}
     command: celery -A config beat -l info
     env_file:
       - .env
     depends_on:
       - redis
+    logging: *default-logging
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    logging: *default-logging
     restart: unless-stopped

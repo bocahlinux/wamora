@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Info, Upload } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
@@ -9,8 +9,9 @@ import { ErrorState } from '../components/ui/ErrorState';
 import { Input } from '../components/ui/Input';
 import { PageHeader } from '../components/ui/PageHeader';
 import type { ApiError } from '../lib/api';
-import { createBlastCampaign } from '../lib/djangoApi';
+import { createBlastCampaign, getMe, listOffices, type OfficeChoice } from '../lib/djangoApi';
 import { config } from '../lib/config';
+import { useApiQuery, type QueryState } from '../lib/useApiQuery';
 import './BlastPage.css';
 
 // Step 0 finding: backend/apps/blast/serializers.py's
@@ -68,7 +69,29 @@ export function BlastCreatePage() {
 
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState<ApiError | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<{ name?: string; messageTemplate?: string; recipients?: string }>({});
+  const [fieldErrors, setFieldErrors] = useState<{ name?: string; messageTemplate?: string; recipients?: string; office?: string }>({});
+
+  // Step 4 (Blast <-> Office integration) — a globally-accessing user
+  // (Superadmin/Global Admin) must pick an Office explicitly; everyone
+  // else's Office is fixed by their own membership and assigned
+  // server-side (serializers.py's validate()), so no picker is shown.
+  const meQuery = useApiQuery(() => getMe(), []);
+  const hasGlobalAccess = meQuery.status === 'success' && meQuery.data.has_global_access;
+  const [officeId, setOfficeId] = useState<number | ''>('');
+  const [officeChoices, setOfficeChoices] = useState<QueryState<OfficeChoice[]>>({ status: 'loading' });
+
+  useEffect(() => {
+    if (!hasGlobalAccess) return;
+    let cancelled = false;
+    setOfficeChoices({ status: 'loading' });
+    listOffices().then((result) => {
+      if (cancelled) return;
+      setOfficeChoices(result.ok ? { status: 'success', data: result.data } : { status: 'error', error: result.error });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasGlobalAccess]);
 
   const recipients = useMemo(() => parseRecipients(recipientsText), [recipientsText]);
   const overCap = recipients.length > MAX_RECIPIENTS_PER_CAMPAIGN;
@@ -87,6 +110,7 @@ export function BlastCreatePage() {
     if (!messageTemplate.trim()) errors.messageTemplate = 'Message template is required.';
     if (recipients.length === 0) errors.recipients = 'At least one recipient is required.';
     else if (overCap) errors.recipients = `A campaign may have at most ${MAX_RECIPIENTS_PER_CAMPAIGN} recipients (currently ${recipients.length}).`;
+    if (hasGlobalAccess && officeId === '') errors.office = 'An Office is required.';
     setFieldErrors(errors);
     return Object.keys(errors).length === 0;
   }
@@ -101,6 +125,7 @@ export function BlastCreatePage() {
       name: name.trim(),
       message_template: messageTemplate,
       recipients,
+      ...(hasGlobalAccess && officeId !== '' ? { office: officeId } : {}),
     });
     setBusy(false);
     if (!result.ok) {
@@ -143,6 +168,44 @@ export function BlastCreatePage() {
                 <span className="wa-blast-form__label">WhatsApp session</span>
                 <span className="wa-blast-form__hint">{sessionName} (the only session configured for this deployment)</span>
               </div>
+
+              {hasGlobalAccess ? (
+                <div className="wa-blast-form__field">
+                  <label className="wa-blast-form__label" htmlFor="blast-office">
+                    Office
+                  </label>
+                  {officeChoices.status === 'loading' ? (
+                    <span className="wa-blast-form__hint">Loading offices…</span>
+                  ) : officeChoices.status === 'error' ? (
+                    <ErrorState error={officeChoices.error} />
+                  ) : (
+                    <select
+                      id="blast-office"
+                      className="wa-blast-form__select"
+                      value={officeId}
+                      onChange={(e) => setOfficeId(e.target.value ? Number(e.target.value) : '')}
+                      disabled={busy}
+                    >
+                      <option value="">Select an Office…</option>
+                      {officeChoices.data.map((office) => (
+                        <option key={office.id} value={office.id}>
+                          {office.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {fieldErrors.office ? <p className="wa-blast-form__error">{fieldErrors.office}</p> : null}
+                </div>
+              ) : meQuery.status === 'success' ? (
+                <div className="wa-blast-form__field">
+                  <span className="wa-blast-form__label">Office</span>
+                  <span className="wa-blast-form__hint">
+                    {meQuery.data.office
+                      ? `${meQuery.data.office.name} (assigned automatically)`
+                      : 'You are not assigned to any Office; contact an administrator before creating a campaign.'}
+                  </span>
+                </div>
+              ) : null}
 
               <Input
                 label="Campaign name"

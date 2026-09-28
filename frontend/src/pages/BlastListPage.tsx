@@ -34,7 +34,8 @@ const BLAST_STATUS_LABEL: Record<BlastCampaignStatus, string> = {
 
 function campaignMeta(campaign: BlastCampaignListItem): string {
   const recipients = `${campaign.recipient_count} recipient${campaign.recipient_count === 1 ? '' : 's'}`;
-  return `${campaign.session} · ${recipients} · by ${campaign.created_by}`;
+  const office = campaign.office ? ` · ${campaign.office.name}` : '';
+  return `${campaign.session} · ${recipients} · by ${campaign.created_by}${office}`;
 }
 
 // GET /api/blast/campaigns/ (backend/apps/blast/views.py

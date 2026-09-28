@@ -484,6 +484,25 @@ class SyncCheckpointRecoveryViewTests(APITestCase):
         checkpoint = SyncCheckpoint.objects.get(session=self.session)
         self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_RUNNING)  # untouched
 
+    def test_office_admin_role_alone_is_still_rejected(self):
+        # Step 8 (Role x Scope alignment) — apps/blast/views.py's approve/
+        # reject now also accept HasOfficeAdminAccess (an Office Admin/
+        # Global Admin ROLE, no 'system administration' Group required),
+        # specifically so that capability never bundles in this endpoint.
+        # SyncCheckpointRecoveryView was deliberately NOT touched, so a
+        # real Office Admin — same organizational role, still no
+        # 'system administration' Group — must remain denied here.
+        from apps.offices.models import ROLE_OFFICE_ADMIN, Office, OfficeMembership
+
+        self._stale_running_checkpoint()
+        user = self._plain_user('officeadmin_roleonly')
+        office = Office.objects.create(name='Office A')
+        OfficeMembership.objects.create(user=user, office=office, role=ROLE_OFFICE_ADMIN)
+        response = self.client.post(self._url(), **self._auth_header(user))
+        self.assertEqual(response.status_code, 403)
+        checkpoint = SyncCheckpoint.objects.get(session=self.session)
+        self.assertEqual(checkpoint.status, SyncCheckpoint.STATUS_RUNNING)  # untouched
+
     def test_unknown_session_returns_404(self):
         user = self._admin_user()
         response = self.client.post(self._url(session_name='does-not-exist'), **self._auth_header(user))

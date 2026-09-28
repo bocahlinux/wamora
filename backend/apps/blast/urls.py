@@ -6,10 +6,12 @@ from .views import (
     BlastCampaignListCreateView,
     BlastCampaignRejectView,
     BlastCampaignSubmitView,
+    BlastOfficeChoicesView,
     BlastRecipientResolveView,
 )
 
 urlpatterns = [
+    path('offices/', BlastOfficeChoicesView.as_view(), name='blast-office-choices'),
     path('campaigns/', BlastCampaignListCreateView.as_view(), name='blast-campaign-list-create'),
     path('campaigns/<int:pk>/', BlastCampaignDetailView.as_view(), name='blast-campaign-detail'),
     path('campaigns/<int:pk>/submit/', BlastCampaignSubmitView.as_view(), name='blast-campaign-submit'),

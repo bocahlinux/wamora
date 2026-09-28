@@ -134,6 +134,21 @@
   outline-offset: 1px;
 }
 
+.wa-blast-form__select {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--surface-default);
+  color: var(--text-primary);
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-body);
+}
+
+.wa-blast-form__select:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
 .wa-blast-form__textarea--error {
   border-color: var(--color-error);
 }

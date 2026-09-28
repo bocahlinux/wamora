@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.audit.models import AuditLog
+from apps.offices.authorization import get_user_office, has_global_access
 
 from .authentication import JWTAuthentication
 from .jwt_utils import JwtNotConfigured, issue_access_token
@@ -111,15 +112,45 @@ class MeView(APIView):
     """Phase 8 dashboard backend foundation — identifies the caller of a
     Django-issued JWT for the frontend's own use (e.g. showing who is
     logged in), without exposing anything beyond the minimal safe fields
-    below. No password, hash, email, or scope/claim data is returned."""
+    below. `is_superuser` lets the UI mirror the Blast self-approval UX;
+    backend authorization continues to read the authenticated Django user.
+    No password, hash, email, or scope/claim data is returned.
+
+    `has_global_access`/`office` — Step 4 (Blast<->Office integration):
+    the minimal addition needed for the frontend to decide whether to
+    show an Office picker (globally-accessing users) or a fixed, already-
+    assigned Office (everyone else) when creating a Blast campaign. Reads
+    `apps.offices.authorization` directly — the same single source of
+    truth every backend Office/role check already uses — rather than
+    re-deriving anything here."""
 
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user
+        office = get_user_office(user)
+        membership = getattr(user, 'office_membership', None)
         return Response({
             'id': user.pk,
             'username': user.username,
             'display_name': user.get_full_name() or user.username,
+            'is_superuser': user.is_superuser,
+            'has_global_access': has_global_access(user),
+            'office': {'id': office.pk, 'name': office.name} if office else None,
+            # Step 6 (Office & User management) — the smallest addition
+            # needed for the frontend to decide whether to show the
+            # Settings admin UI for an Office Admin too, not just a
+            # globally-accessing user (`has_global_access` alone doesn't
+            # cover that case). `None` for a Superadmin/Operator/no
+            # membership at all.
+            'role': membership.role if membership else None,
+            # Step 14 (Operator assignment & availability foundation) —
+            # the smallest addition needed for the frontend to render the
+            # operator's OWN current availability toggle correctly on
+            # load, instead of guessing/defaulting it locally. `None` for
+            # anyone without a membership row (including Superadmin) —
+            # meaningful only alongside `role == 'operator'`, same as
+            # every other membership-only field here.
+            'is_available': membership.is_available if membership else None,
         })

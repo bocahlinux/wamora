@@ -23,8 +23,11 @@ from rest_framework.views import APIView
 
 from apps.audit.models import AuditLog
 from apps.authn.authentication import JWTAuthentication
-from apps.authn.permissions import HasBlastScope, HasSystemAdministrationScope
+from apps.authn.permissions import HasBlastScope, HasOfficeAdminAccess, HasSystemAdministrationScope
+from apps.offices.authorization import has_global_access
+from apps.offices.models import Office
 
+from .authorization import campaigns_visible_to, can_view_campaign
 from .limits import remaining_daily_budget
 from .models import BlastCampaign, BlastRecipient
 from .serializers import (
@@ -33,6 +36,7 @@ from .serializers import (
     BlastCampaignListSerializer,
     BlastCampaignRejectSerializer,
     BlastRecipientResolveSerializer,
+    OfficeChoiceSerializer,
 )
 from .tasks import _maybe_finalize_campaign, schedule_blast_campaign_task
 
@@ -64,9 +68,11 @@ class BlastCampaignListCreateView(APIView):
         return [IsAuthenticated(), (HasBlastScope | HasSystemAdministrationScope)()]
 
     def get(self, request):
-        campaigns = BlastCampaign.objects.select_related('session', 'created_by', 'approved_by').order_by(
-            '-created_at'
-        )
+        # Step 4 (Office integration) — campaigns_visible_to() is the
+        # single Office-boundary rule; see apps.blast.authorization.
+        campaigns = campaigns_visible_to(request.user).select_related(
+            'session', 'office', 'created_by', 'approved_by'
+        ).order_by('-created_at')
         return Response(BlastCampaignListSerializer(campaigns, many=True).data)
 
     def post(self, request):
@@ -93,12 +99,33 @@ class BlastCampaignDetailView(APIView):
 
     def get(self, request, pk):
         campaign = get_object_or_404(
-            BlastCampaign.objects.select_related('session', 'created_by', 'approved_by').prefetch_related(
+            BlastCampaign.objects.select_related('session', 'office', 'created_by', 'approved_by').prefetch_related(
                 'recipients'
             ),
             pk=pk,
         )
+        # Step 4 (Office integration) — same rule as the list view above.
+        if not can_view_campaign(request.user, campaign):
+            return _error(request, 403, 'forbidden', 'You do not have access to this campaign.')
         return Response(BlastCampaignDetailSerializer(campaign).data)
+
+
+class BlastOfficeChoicesView(APIView):
+    """GET /api/blast/offices/ — Step 4's minimal read-only office list,
+    for a globally-accessing creator's campaign-create Office picker
+    only (Office Admin/Operator have their Office auto-assigned server-
+    side and never need this). Not Office management — no create/edit/
+    deactivate endpoint exists anywhere; that is explicitly out of this
+    step's scope."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, (HasBlastScope | HasSystemAdministrationScope)]
+
+    def get(self, request):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a globally-accessing administrator may list Offices.')
+        offices = Office.objects.filter(is_active=True).order_by('name')
+        return Response(OfficeChoiceSerializer(offices, many=True).data)
 
 
 class BlastCampaignSubmitView(APIView):
@@ -138,10 +165,11 @@ class BlastCampaignSubmitView(APIView):
 
 class BlastCampaignApproveView(APIView):
     """POST /api/blast/campaigns/<pk>/approve/ — pending_approval ->
-    approved, admin-only ('system administration'), and the approving
-    user must differ from `created_by` (finalized decision 4 — checked
-    explicitly here, not merely inferred from scope difference, since one
-    user could hold both 'blast' and 'system administration').
+    approved, admin-only ('system administration'). A non-superuser must
+    differ from `created_by`; a Django superuser may approve their own
+    campaign. This exception is checked explicitly here, not inferred from
+    scope difference, since a non-superuser may hold both 'blast' and
+    'system administration'.
 
     Also enforces the 500/day/session budget HERE, before writing
     `approved` (design audit Section 5/11: "rejected at approval time...
@@ -154,12 +182,23 @@ class BlastCampaignApproveView(APIView):
     Celery tasks — this view itself never touches BFF/WAHA."""
 
     authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated, HasSystemAdministrationScope]
+    # Step 8 (Role x Scope alignment) — Office/Global Admin reach approval
+    # via their organizational role (HasOfficeAdminAccess), not just the
+    # `system administration` Group/scope, which also gates unrelated
+    # global Sync Recovery — granting that as a side effect of Blast
+    # approval capability is exactly what this avoids. Office boundary
+    # (can_view_campaign) and the self-approval rule below are unchanged.
+    permission_classes = [IsAuthenticated, (HasSystemAdministrationScope | HasOfficeAdminAccess)]
 
     def post(self, request, pk):
-        campaign = get_object_or_404(BlastCampaign.objects.select_related('session'), pk=pk)
+        campaign = get_object_or_404(BlastCampaign.objects.select_related('session', 'office'), pk=pk)
 
-        if campaign.created_by_id == request.user.id:
+        # Step 4 (Office integration) — checked before the existing
+        # self-approval rule below; that rule is unchanged either way.
+        if not can_view_campaign(request.user, campaign):
+            return _error(request, 403, 'forbidden', 'You do not have access to this campaign.')
+
+        if campaign.created_by_id == request.user.id and not request.user.is_superuser:
             return _error(request, 403, 'forbidden', 'A campaign cannot be approved by its own creator.')
 
         if not BlastCampaign.is_valid_transition(campaign.status, BlastCampaign.STATUS_APPROVED):
@@ -205,10 +244,15 @@ class BlastCampaignRejectView(APIView):
     resubmission of the same campaign row."""
 
     authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated, HasSystemAdministrationScope]
+    # Step 8 — same reasoning as BlastCampaignApproveView above.
+    permission_classes = [IsAuthenticated, (HasSystemAdministrationScope | HasOfficeAdminAccess)]
 
     def post(self, request, pk):
-        campaign = get_object_or_404(BlastCampaign, pk=pk)
+        campaign = get_object_or_404(BlastCampaign.objects.select_related('office'), pk=pk)
+
+        # Step 4 (Office integration).
+        if not can_view_campaign(request.user, campaign):
+            return _error(request, 403, 'forbidden', 'You do not have access to this campaign.')
 
         if not BlastCampaign.is_valid_transition(campaign.status, BlastCampaign.STATUS_REJECTED):
             return _error(

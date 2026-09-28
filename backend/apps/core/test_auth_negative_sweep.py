@@ -71,12 +71,29 @@ from apps.blast.views import (
     BlastCampaignListCreateView,
     BlastCampaignRejectView,
     BlastCampaignSubmitView,
+    BlastOfficeChoicesView,
     BlastRecipientResolveView,
 )
-from apps.chats.views import ChatListView, ChatMarkReadView, ChatMessagesView
+from apps.chats.views import (
+    ChatAssignView,
+    ChatListView,
+    ChatMarkReadView,
+    ChatMessagesView,
+    ChatOperatorsView,
+    ChatUnassignView,
+)
 from apps.core.views import DatabaseHealthView, LivenessView, RedisHealthView
 from apps.dashboard.views import ActivityFeedView, MessagesStatsView
+from apps.offices.views import (
+    OfficeDetailView,
+    OfficeInboxConfigView,
+    OfficeListCreateView,
+    OperatorAvailabilityView,
+    UserDetailView,
+    UserListCreateView,
+)
 from apps.operations.views import OutboundOperationRegisterView, OutboundOperationResolveView
+from apps.chats.internal_views import OperatorChatOfficesView, OperatorChatSelectOfficeView
 from apps.sync.internal_views import ReconciliationTriggerView
 from apps.sync.views import SyncCheckpointRecoveryView, SyncCheckpointTaskStateView, SyncStatusView
 from apps.webhooks.views import WahaWebhookView
@@ -113,6 +130,12 @@ ENDPOINT_REGISTRY = [
     {'view': WahaWebhookView, 'method': 'post', 'url': '/api/webhooks/waha/', 'kind': 'public'},
     # --- authenticated-only (no scope requirement) --------------------
     {'view': MeView, 'method': 'get', 'url': '/api/auth/me/', 'kind': 'authenticated_only'},
+    {
+        'view': OperatorAvailabilityView,
+        'method': 'patch',
+        'url': '/api/auth/me/availability/',
+        'kind': 'authenticated_only',
+    },
     # --- scoped (JWT + a specific scope permission) --------------------
     {'view': MessagesStatsView, 'method': 'get', 'url': '/api/dashboard/messages/', 'kind': 'scoped'},
     {'view': ActivityFeedView, 'method': 'get', 'url': '/api/dashboard/activity/', 'kind': 'scoped'},
@@ -127,6 +150,24 @@ ENDPOINT_REGISTRY = [
         'view': ChatMarkReadView,
         'method': 'post',
         'url': f'/api/chats/{NONEXISTENT_PK}/read/',
+        'kind': 'scoped',
+    },
+    {
+        'view': ChatOperatorsView,
+        'method': 'get',
+        'url': f'/api/chats/{NONEXISTENT_PK}/operators/',
+        'kind': 'scoped',
+    },
+    {
+        'view': ChatAssignView,
+        'method': 'post',
+        'url': f'/api/chats/{NONEXISTENT_PK}/assign/',
+        'kind': 'scoped',
+    },
+    {
+        'view': ChatUnassignView,
+        'method': 'post',
+        'url': f'/api/chats/{NONEXISTENT_PK}/unassign/',
         'kind': 'scoped',
     },
     {
@@ -147,6 +188,7 @@ ENDPOINT_REGISTRY = [
         'url': f'/api/sync/task-state/{NONEXISTENT_SESSION}/',
         'kind': 'scoped',
     },
+    {'view': BlastOfficeChoicesView, 'method': 'get', 'url': '/api/blast/offices/', 'kind': 'scoped'},
     {'view': BlastCampaignListCreateView, 'method': 'get', 'url': '/api/blast/campaigns/', 'kind': 'scoped'},
     {'view': BlastCampaignListCreateView, 'method': 'post', 'url': '/api/blast/campaigns/', 'kind': 'scoped'},
     {
@@ -179,6 +221,26 @@ ENDPOINT_REGISTRY = [
         'url': f'/api/blast/campaigns/{NONEXISTENT_PK}/recipients/{NONEXISTENT_PK}/resolve/',
         'kind': 'scoped',
     },
+    {'view': OfficeListCreateView, 'method': 'get', 'url': '/api/offices/', 'kind': 'scoped'},
+    {'view': OfficeListCreateView, 'method': 'post', 'url': '/api/offices/', 'kind': 'scoped'},
+    {'view': OfficeDetailView, 'method': 'get', 'url': f'/api/offices/{NONEXISTENT_PK}/', 'kind': 'scoped'},
+    {'view': OfficeDetailView, 'method': 'patch', 'url': f'/api/offices/{NONEXISTENT_PK}/', 'kind': 'scoped'},
+    {
+        'view': OfficeInboxConfigView,
+        'method': 'get',
+        'url': f'/api/offices/{NONEXISTENT_PK}/inbox-config/',
+        'kind': 'scoped',
+    },
+    {
+        'view': OfficeInboxConfigView,
+        'method': 'patch',
+        'url': f'/api/offices/{NONEXISTENT_PK}/inbox-config/',
+        'kind': 'scoped',
+    },
+    {'view': UserListCreateView, 'method': 'get', 'url': '/api/users/', 'kind': 'scoped'},
+    {'view': UserListCreateView, 'method': 'post', 'url': '/api/users/', 'kind': 'scoped'},
+    {'view': UserDetailView, 'method': 'get', 'url': f'/api/users/{NONEXISTENT_PK}/', 'kind': 'scoped'},
+    {'view': UserDetailView, 'method': 'patch', 'url': f'/api/users/{NONEXISTENT_PK}/', 'kind': 'scoped'},
     # --- internal-service-key (BFF/Celery, no JWT) ----------------------
     {
         'view': OutboundOperationRegisterView,
@@ -197,6 +259,18 @@ ENDPOINT_REGISTRY = [
         'view': ReconciliationTriggerView,
         'method': 'post',
         'url': '/internal/reconciliation/trigger/',
+        'kind': 'internal_key',
+    },
+    {
+        'view': OperatorChatOfficesView,
+        'method': 'get',
+        'url': '/internal/operator-chat/offices/',
+        'kind': 'internal_key',
+    },
+    {
+        'view': OperatorChatSelectOfficeView,
+        'method': 'post',
+        'url': '/internal/operator-chat/select-office/',
         'kind': 'internal_key',
     },
 ]

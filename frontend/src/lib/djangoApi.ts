@@ -28,10 +28,23 @@ export function getRedisHealth() {
   return request<ComponentHealth>(`${config.djangoBaseUrl}/api/health/redis/`);
 }
 
+/** Step 4/6 (Office <-> Blast/Settings integration) — `office` is `null`
+ * for a user with no Office membership (or a Global Admin, who
+ * deliberately has none). `has_global_access` is true for Superadmin or
+ * Global Admin — both see/act across every Office. `role` is `null` for
+ * a Superadmin/Operator/no-membership user — used only to decide whether
+ * to show the Settings admin UI for an Office Admin too (SettingsPage.tsx). */
 export interface Me {
   id: number;
   username: string;
   display_name: string;
+  is_superuser: boolean;
+  has_global_access: boolean;
+  office: { id: number; name: string } | null;
+  role: 'global_admin' | 'office_admin' | 'operator' | null;
+  /** Step 14 — `null` for anyone without a membership row; only
+   * meaningful alongside `role === 'operator'`. */
+  is_available: boolean | null;
 }
 
 /** GET /api/auth/me/ — docs/generated/PHASE-8-DASHBOARD-BACKEND-FOUNDATION-REPORT.md
@@ -97,6 +110,15 @@ export interface PaginatedResponse<T> {
   results: T[];
 }
 
+/** Step 14 (Operator assignment foundation) — `null` when the Chat has
+ * no operator currently assigned. */
+export interface AssignedOperator {
+  id: number;
+  username: string;
+  first_name: string;
+  last_name: string;
+}
+
 export interface ChatSummary {
   id: number;
   provider_chat_id: string;
@@ -107,12 +129,62 @@ export interface ChatSummary {
   last_message_at: string | null;
   last_read_at: string | null;
   unread: boolean;
+  assigned_to: AssignedOperator | null;
 }
 
 /** GET /api/chats/ — paginated, most-recently-active chat first.
  * Requires the JWT's `reading` scope (apps.authn.permissions.HasReadingScope). */
 export function getChats(page = 1) {
   return request<PaginatedResponse<ChatSummary>>(`${config.djangoBaseUrl}/api/chats/?page=${page}`, {
+    headers: authHeader(),
+  });
+}
+
+export interface OperatorCandidate {
+  id: number;
+  username: string;
+  first_name: string;
+  last_name: string;
+  is_available: boolean;
+}
+
+/** GET /api/chats/:id/operators/ — Step 14. Operators who may currently
+ * be assigned this chat (real membership in the chat's own Office, role
+ * operator, available, active). Requires HasOfficeAdminAccess
+ * (Superadmin/Global Admin/Office Admin — never a plain Operator). */
+export function getChatOperators(chatId: number) {
+  return request<OperatorCandidate[]>(`${config.djangoBaseUrl}/api/chats/${chatId}/operators/`, {
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/chats/:id/assign/ — body {user_id}. Server re-validates the
+ * target against the database regardless of what getChatOperators()
+ * previously returned. Returns the updated chat summary shape. */
+export function assignChat(chatId: number, userId: number) {
+  return request<ChatSummary>(`${config.djangoBaseUrl}/api/chats/${chatId}/assign/`, {
+    method: 'POST',
+    body: { user_id: userId },
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/chats/:id/unassign/ — no body. Never removes the chat from
+ * the Inbox; only clears assigned_to. */
+export function unassignChat(chatId: number) {
+  return request<ChatSummary>(`${config.djangoBaseUrl}/api/chats/${chatId}/unassign/`, {
+    method: 'POST',
+    headers: authHeader(),
+  });
+}
+
+/** PATCH /api/auth/me/availability/ — Step 14. Self-service only; the
+ * server always targets the caller's own OfficeMembership. Only a real
+ * role=operator membership may use this (403 otherwise). */
+export function updateOperatorAvailability(isAvailable: boolean) {
+  return request<{ is_available: boolean }>(`${config.djangoBaseUrl}/api/auth/me/availability/`, {
+    method: 'PATCH',
+    body: { is_available: isAvailable },
     headers: authHeader(),
   });
 }
@@ -275,6 +347,9 @@ export interface BlastCampaignListItem {
   approved_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Step 4 (Blast <-> Office integration) — `null` for a legacy campaign
+   * created before Office was introduced (no backfill was performed). */
+  office: { id: number; name: string } | null;
 }
 
 export interface BlastCampaignDetail extends BlastCampaignListItem {
@@ -305,6 +380,12 @@ export interface CreateBlastCampaignInput {
   name: string;
   message_template: string;
   recipients: string[];
+  /** Step 4 (Blast <-> Office integration) — only meaningful for a
+   * globally-accessing user (Superadmin/Global Admin), who must pick an
+   * Office explicitly. For everyone else the backend ignores whatever is
+   * sent here and forces the caller's own Office (serializers.py
+   * validate()) — so this is omitted entirely for non-global users. */
+  office?: number;
 }
 
 /** POST /api/blast/campaigns/ — creates a `draft` campaign (requires the
@@ -317,6 +398,22 @@ export function createBlastCampaign(input: CreateBlastCampaignInput) {
   return request<BlastCampaignDetail>(`${config.djangoBaseUrl}/api/blast/campaigns/`, {
     method: 'POST',
     body: input,
+    headers: authHeader(),
+  });
+}
+
+export interface OfficeChoice {
+  id: number;
+  name: string;
+}
+
+/** GET /api/blast/offices/ — Step 4 (Blast <-> Office integration): the
+ * Office picker's data source for a globally-accessing user creating a
+ * campaign. Gated server-side to `has_global_access` (403 otherwise) —
+ * this is NOT a general Office-management endpoint (views.py's
+ * BlastOfficeChoicesView). */
+export function listOffices() {
+  return request<OfficeChoice[]>(`${config.djangoBaseUrl}/api/blast/offices/`, {
     headers: authHeader(),
   });
 }
@@ -379,4 +476,161 @@ export function resolveBlastRecipient(campaignId: number, recipientId: number, s
       headers: authHeader(),
     },
   );
+}
+
+// ---------------------------------------------------------------------
+// Step 6 — Office & User management (apps/offices/views.py). Only
+// reachable server-side by a globally-accessing administrator
+// (Superadmin/Global Admin, for Office management) or an admin with the
+// 'user administration' scope (Office/Global Admin, for User
+// management) — this client never enforces that itself; the frontend
+// only decides whether to *show* the Settings admin UI (SettingsPage.tsx),
+// same "frontend is not the security boundary" discipline as every
+// other page in this file.
+// ---------------------------------------------------------------------
+
+export interface Office {
+  id: number;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/offices/ — every Office, active and inactive (OfficeListCreateView). */
+export function getOffices() {
+  return request<Office[]>(`${config.djangoBaseUrl}/api/offices/`, { headers: authHeader() });
+}
+
+/** POST /api/offices/ — create an Office. `name` must be unique (409/400
+ * from the server otherwise, surfaced as the usual ApiError). */
+export function createOffice(name: string) {
+  return request<Office>(`${config.djangoBaseUrl}/api/offices/`, {
+    method: 'POST',
+    body: { name },
+    headers: authHeader(),
+  });
+}
+
+/** PATCH /api/offices/:id/ — update name and/or is_active. Deactivating
+ * an Office does not delete or cascade anything; it only stops it from
+ * being selectable for a *new* Blast campaign (BlastCampaignCreateSerializer). */
+export function updateOffice(id: number, patch: Partial<Pick<Office, 'name' | 'is_active'>>) {
+  return request<Office>(`${config.djangoBaseUrl}/api/offices/${id}/`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
+}
+
+/** Step 10 — per-Office Inbox configuration FOUNDATION. Saving this
+ * never sends a message or drives any WhatsApp flow — no backend code
+ * reads this model for that yet (OfficeInboxConfigView's own docstring).
+ * `Office.is_active` and `enabled` are independent: an inactive Office
+ * may still have `enabled: true` saved here. */
+export interface OfficeInboxConfig {
+  enabled: boolean;
+  welcome_message: string;
+  waiting_message: string;
+  offline_message: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/offices/:id/inbox-config/ — lazily created server-side on
+ * first read (safe defaults: enabled=false, empty messages) — never
+ * requires a separate "create" call. */
+export function getOfficeInboxConfig(officeId: number) {
+  return request<OfficeInboxConfig>(`${config.djangoBaseUrl}/api/offices/${officeId}/inbox-config/`, {
+    headers: authHeader(),
+  });
+}
+
+export type UpdateOfficeInboxConfigInput = Partial<
+  Pick<OfficeInboxConfig, 'enabled' | 'welcome_message' | 'waiting_message' | 'offline_message'>
+>;
+
+/** PATCH /api/offices/:id/inbox-config/ — Superadmin/Global Admin for
+ * any Office, an Office Admin only their own (OfficeInboxConfigView's
+ * `_admin_scope` check — same helper as every other Office/User admin
+ * endpoint). */
+export function updateOfficeInboxConfig(officeId: number, patch: UpdateOfficeInboxConfigInput) {
+  return request<OfficeInboxConfig>(`${config.djangoBaseUrl}/api/offices/${officeId}/inbox-config/`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
+}
+
+export type OfficeRole = 'global_admin' | 'office_admin' | 'operator';
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  first_name: string;
+  last_name: string;
+  is_active: boolean;
+  is_superuser: boolean;
+  /** `null` for a Superadmin (no OfficeMembership row at all). */
+  role: OfficeRole | null;
+  /** `null` for a Global Admin (by design — not tied to one Office) or a Superadmin. */
+  office: { id: number; name: string } | null;
+  date_joined: string;
+}
+
+/** GET /api/users/ — every user visible to the caller's admin scope:
+ * all of them for Superadmin/Global Admin, only the caller's own
+ * Office's users for an Office Admin (UserListCreateView). */
+export function getUsers() {
+  return request<AdminUser[]>(`${config.djangoBaseUrl}/api/users/`, { headers: authHeader() });
+}
+
+export function getUser(id: number) {
+  return request<AdminUser>(`${config.djangoBaseUrl}/api/users/${id}/`, { headers: authHeader() });
+}
+
+export interface CreateUserInput {
+  username: string;
+  password: string;
+  first_name?: string;
+  last_name?: string;
+  role: OfficeRole;
+  /** Required for office_admin/operator; omit (or send null) for global_admin. */
+  office?: number | null;
+}
+
+/** POST /api/users/ — creates a Django User plus its OfficeMembership in
+ * one call. Never creates a Superadmin — there is no `is_superuser`
+ * field here or anywhere else in this API; that stays a Django-only
+ * action. An Office Admin's own Office is forced server-side regardless
+ * of what `office` is sent (UserCreateSerializer.validate()). */
+export function createUser(input: CreateUserInput) {
+  return request<AdminUser>(`${config.djangoBaseUrl}/api/users/`, {
+    method: 'POST',
+    body: input,
+    headers: authHeader(),
+  });
+}
+
+export interface UpdateUserInput {
+  first_name?: string;
+  last_name?: string;
+  password?: string;
+  is_active?: boolean;
+  /** `role` and `office` must be sent together (UserDetailView.patch) —
+   * omit both to leave Office role/membership untouched. */
+  role?: OfficeRole;
+  office?: number | null;
+}
+
+/** PATCH /api/users/:id/ — profile fields and/or role+office. The
+ * server rejects a caller targeting their own account here (403) unless
+ * they are a Superadmin, and rejects an Office Admin acting outside
+ * their own Office or attempting to assign global_admin (403). */
+export function updateUser(id: number, patch: UpdateUserInput) {
+  return request<AdminUser>(`${config.djangoBaseUrl}/api/users/${id}/`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
 }

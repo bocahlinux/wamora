@@ -3,7 +3,9 @@ import logging
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from apps.chats.inbox_lifecycle import handle_inbox_lifecycle_message
 from apps.chats.models import Chat, Contact, Message
+from apps.chats.operator_chat import handle_operator_chat_message
 from apps.waha_sessions.models import WahaSession
 from apps.webhooks.models import WebhookEvent
 from apps.webhooks.parsing import (
@@ -60,7 +62,7 @@ def ingest_webhook(envelope: WebhookEnvelope) -> WebhookEvent:
     try:
         with transaction.atomic():
             parsed = parse_message(envelope.payload)
-            persist_message(session, parsed)
+            message = persist_message(session, parsed)
     except MessageParsingError as exc:
         logger.warning('WebhookEvent %s could not be processed: %s', webhook_event.pk, exc)
         webhook_event.status = WebhookEvent.STATUS_FAILED
@@ -73,6 +75,26 @@ def ingest_webhook(envelope: WebhookEnvelope) -> WebhookEvent:
         webhook_event.save(update_fields=['status', 'processed_at', 'updated_at'])
         return webhook_event
 
+    # Step 12/13 — WhatsApp Office-selection auto-reply / Inbox welcome
+    # lifecycle. Deliberately AFTER the atomic block above (never inside
+    # it): a failed outbound reply must never roll back the inbound
+    # message that was already successfully received and committed.
+    # Deliberately only reached from THIS live-webhook path, never from
+    # `persist_message()` itself (also called by `apps.sync.reconciliation`
+    # for history backfill, which must never trigger a fresh Office-
+    # selection reply or welcome message for old messages). The two
+    # handlers are mutually exclusive per message — `Chat.office IS NULL`
+    # is always Step 12's job, `IS NOT NULL` is always Step 13's; a
+    # message that itself just set `Chat.office` (a Step 12 selection
+    # reply) is handled by Step 12 alone for that turn — welcome starts
+    # from the Chat's NEXT inbound message once `office_id` is already set
+    # (Step 13's own documented, deliberate timing decision).
+    if message.direction == Message.DIRECTION_INBOUND:
+        if message.chat.office_id is None:
+            handle_operator_chat_message(session, message)
+        else:
+            handle_inbox_lifecycle_message(session, message)
+
     webhook_event.status = WebhookEvent.STATUS_PROCESSED
     webhook_event.processed_at = timezone.now()
     webhook_event.save(update_fields=['status', 'processed_at', 'updated_at'])
@@ -83,10 +105,16 @@ def persist_message(session: WahaSession, parsed: ParsedMessage) -> Message:
     """Shared by webhook ingestion (Phase 3) and reconciliation (Phase 4,
     apps/sync/reconciliation.py) — both must apply identical Chat/Contact/
     Message persistence rules, so this is not duplicated."""
+    # Step 9 (Inbox Office routing foundation) — a NEW Chat's `office` is
+    # copied from `session.office` at creation time only (`defaults=` is
+    # never applied by get_or_create to an already-existing row, so an
+    # existing Chat's `office` is never overwritten here). `session.office`
+    # being NULL (unmapped session) is copied through as NULL — never
+    # guessed, never auto-assigned.
     chat, _ = Chat.objects.get_or_create(
         session=session,
         provider_chat_id=parsed.chat_provider_id,
-        defaults={'is_group': parsed.is_group},
+        defaults={'is_group': parsed.is_group, 'office': session.office},
     )
 
     if not parsed.from_me and not parsed.is_group:

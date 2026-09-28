@@ -36,3 +36,16 @@ CACHES = {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
     }
 }
+
+# Step 12 (operator-chat WhatsApp auto-reply) — settings.py's
+# BFF_INTERNAL_BASE_URL/OFFICE_DISPATCH_SERVICE_KEY read from the real
+# process environment (config/env.py loads backend/.env even for `manage.py
+# test`), which on a developer machine can point at a real, locally-running
+# BFF. Forced empty here so `apps.blast.bff_client.send_blast_message` (now
+# reachable from ordinary webhook-ingestion tests via
+# `apps.chats.operator_chat.handle_operator_chat_message`, not just Blast's
+# own already-mocked dispatch path) always fails fast with BffDispatchError
+# — never a real network call — matching this module's own "no reachable
+# external dependency" contract already established for CACHES above.
+BFF_INTERNAL_BASE_URL = ''
+OFFICE_DISPATCH_SERVICE_KEY = ''
