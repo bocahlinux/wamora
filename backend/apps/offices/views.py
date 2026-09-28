@@ -13,6 +13,7 @@ though in practice a superuser always has every scope already.
 """
 
 from django.contrib.auth.models import User
+from django.db.models import ProtectedError
 from django.shortcuts import get_object_or_404
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -22,17 +23,18 @@ from apps.audit.models import AuditLog
 from apps.authn.authentication import JWTAuthentication
 from apps.authn.permissions import HasUserAdministrationScope
 
-from .authorization import has_global_access
-from .models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeInboxConfig, OfficeMembership
+from .authorization import has_global_access, is_office_admin_role, is_operator_role
+from .models import Office, OfficeInboxConfig, OfficeMembership, Role
 from .serializers import (
     MembershipUpdateSerializer,
     OfficeInboxConfigSerializer,
     OfficeSerializer,
     OperatorAvailabilitySerializer,
+    RoleSerializer,
     UserCreateSerializer,
     UserProfileUpdateSerializer,
     UserSerializer,
-    _sync_admin_scope_group,
+    _sync_role_groups,
 )
 
 
@@ -49,9 +51,8 @@ def _admin_scope(user):
     access whatsoever."""
     if has_global_access(user):
         return 'global'
-    membership = getattr(user, 'office_membership', None)
-    if membership is not None and membership.role == ROLE_OFFICE_ADMIN:
-        return membership.office
+    if is_office_admin_role(user):
+        return user.office_membership.office
     return None
 
 
@@ -159,8 +160,107 @@ class OfficeInboxConfigView(APIView):
         return Response(OfficeInboxConfigSerializer(config).data)
 
 
+class RoleListCreateView(APIView):
+    """GET /api/roles/ — readable by any actor with administration access
+    at all (`_admin_scope(request.user) is not None` — Superuser, Global
+    Admin, OR Office Admin), so the Users form's single `role` picker
+    (`UserDetailView`/`UserCreateSerializer`) has a real catalog to
+    choose from regardless of who's creating/editing the user — an Office
+    Admin can still only ever WRITE a non-`grants_global_access` Role
+    (enforced separately in `UserListCreateView.post`/
+    `UserDetailView.patch`), but they need to be able to SEE the Role
+    catalog to make that choice at all; the old fixed 3-value enum never
+    needed an API call for this, but a dynamic Role does. POST
+    /api/roles/ — Superuser-only:
+    *defining* what a Role grants must never be reachable by a
+    non-superuser, not even a Global Admin who holds `user
+    administration` themselves (via their own assigned Role) — otherwise
+    a Global Admin could mint themselves a Role containing a scope they
+    don't already have (e.g. `system administration`), the exact
+    self-escalation every other check in `apps.authn.permissions` already
+    guards against. Deliberately checks `request.user.is_superuser`
+    directly rather than a permission class — `is_superuser` was never
+    put in the JWT itself, and GET/POST need different authorization on
+    the same view (same "coarse `permission_classes` gate + fine-grained
+    per-method check" shape `OfficeListCreateView` above already uses)."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if _admin_scope(request.user) is None:
+            return _error(request, 403, 'forbidden', 'You do not have administration access.')
+        roles = Role.objects.all().order_by('name')
+        return Response(RoleSerializer(roles, many=True).data)
+
+    def post(self, request):
+        if not request.user.is_superuser:
+            return _error(request, 403, 'forbidden', 'Only a Superadmin may create a Role.')
+        serializer = RoleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        role = serializer.save()
+        AuditLog.objects.create(actor=request.user, action='role.create', target=role.name, result=AuditLog.RESULT_SUCCESS)
+        return Response(RoleSerializer(role).data, status=201)
+
+
+class RoleDetailView(APIView):
+    """GET /api/roles/<pk>/ — same admin-access read rule as the list
+    view above. PATCH/DELETE — Superuser-only, same reasoning as
+    `RoleListCreateView.post`. DELETE is blocked (400, not a raw 500)
+    while any `OfficeMembership` still points at this Role
+    (`on_delete=PROTECT` on `OfficeMembership.role`) — a Superadmin must
+    reassign every affected user to a different Role first (every
+    membership requires one), same "explicit, deliberate action"
+    convention as every other PROTECTed FK in this app."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if _admin_scope(request.user) is None:
+            return _error(request, 403, 'forbidden', 'You do not have administration access.')
+        role = get_object_or_404(Role, pk=pk)
+        return Response(RoleSerializer(role).data)
+
+    def patch(self, request, pk):
+        if not request.user.is_superuser:
+            return _error(request, 403, 'forbidden', 'Only a Superadmin may edit a Role.')
+        role = get_object_or_404(Role, pk=pk)
+        serializer = RoleSerializer(role, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        AuditLog.objects.create(actor=request.user, action='role.update', target=role.name, result=AuditLog.RESULT_SUCCESS)
+        # Re-sync every currently-assigned member's Groups immediately —
+        # otherwise an edit to an in-use Role's scopes would only take
+        # effect the next time each affected user's own membership was
+        # separately saved, which is surprising for what looks like a
+        # single, immediate admin action.
+        for membership in role.memberships.select_related('user').all():
+            _sync_role_groups(membership.user, role)
+        return Response(RoleSerializer(role).data)
+
+    def delete(self, request, pk):
+        if not request.user.is_superuser:
+            return _error(request, 403, 'forbidden', 'Only a Superadmin may delete a Role.')
+        role = get_object_or_404(Role, pk=pk)
+        try:
+            role.delete()
+        except ProtectedError:
+            count = role.memberships.count()
+            return _error(
+                request, 400, 'invalid',
+                f'This Role is assigned to {count} user(s) — reassign or clear it from them first.',
+            )
+        AuditLog.objects.create(actor=request.user, action='role.delete', target=role.name, result=AuditLog.RESULT_SUCCESS)
+        # A 200 with a small JSON body, not a bare 204 — frontend/src/lib/
+        # api.ts's request() treats an empty-bodied 2xx as an unparseable
+        # `kind: 'unknown'` error (it expects every successful response to
+        # carry JSON), matching every other endpoint in this API.
+        return Response({'deleted': True})
+
+
 def _users_queryset():
-    return User.objects.select_related('office_membership', 'office_membership__office')
+    return User.objects.select_related('office_membership', 'office_membership__office', 'office_membership__role')
 
 
 class UserListCreateView(APIView):
@@ -187,12 +287,21 @@ class UserListCreateView(APIView):
         scope = _admin_scope(request.user)
         if scope is None:
             return _error(request, 403, 'forbidden', 'You do not have administration access.')
-        if scope != 'global' and request.data.get('role') == ROLE_GLOBAL_ADMIN:
-            return _error(
-                request, 403, 'forbidden', 'Only a globally-accessing administrator may create a Global Admin.'
-            )
         serializer = UserCreateSerializer(data=request.data, context={'actor_scope': scope})
         serializer.is_valid(raise_exception=True)
+        # Checked AFTER validation (not against the raw request body) so
+        # this always reads the real Role's flag, never a client-supplied
+        # id that happens to look right — same "only a globally-accessing
+        # actor may create a Global Admin"-equivalent guard as before this
+        # merge, now keyed off `role.grants_global_access` instead of
+        # comparing to the old fixed string. An Office Admin creating
+        # another Office-Admin-equivalent or Operator-equivalent Role
+        # within their own Office is unaffected, same as before.
+        if scope != 'global' and serializer.validated_data['role'].grants_global_access:
+            return _error(
+                request, 403, 'forbidden',
+                'Only a globally-accessing administrator may assign a Role with global access.',
+            )
         user = serializer.save()
         AuditLog.objects.create(
             actor=request.user, action='user.create', target=user.username, result=AuditLog.RESULT_SUCCESS
@@ -265,14 +374,18 @@ class UserDetailView(APIView):
             role = membership_serializer.validated_data['role']
             office = membership_serializer.validated_data.get('office')
             if scope != 'global':
-                if role == ROLE_GLOBAL_ADMIN:
+                if role.grants_global_access:
                     return _error(
-                        request, 403, 'forbidden', 'Only a globally-accessing administrator may assign Global Admin.'
+                        request, 403, 'forbidden',
+                        'Only a globally-accessing administrator may assign a Role with global access.',
                     )
                 if office is None or office.pk != scope.pk:
                     return _error(request, 403, 'forbidden', 'An Office Admin cannot move a user to another Office.')
-            OfficeMembership.objects.update_or_create(user=target, defaults={'role': role, 'office': office})
-            _sync_admin_scope_group(target, role)
+            OfficeMembership.objects.update_or_create(
+                user=target,
+                defaults={'role': role, 'office': office, 'requires_office': not role.grants_global_access},
+            )
+            _sync_role_groups(target, role)
 
         AuditLog.objects.create(
             actor=request.user, action='user.update', target=target.username, result=AuditLog.RESULT_SUCCESS
@@ -291,17 +404,17 @@ class OperatorAvailabilityView(APIView):
     someone ELSE's availability (Step 14 Section 11's own explicit
     rule); they would need the existing `UserDetailView` role/office
     PATCH for that, which this deliberately does not touch or duplicate.
-    Only an actual `role=operator` membership may use this endpoint —
-    matches `apps.chats.assignment.valid_assignment_candidates`'s own
-    `role=operator`-only scope, so this field only ever means something
-    for the same rows that field is read from."""
+    Only a membership whose Role carries `is_operator` may use this
+    endpoint — matches `apps.chats.assignment.valid_assignment_candidates`'s
+    own `role__is_operator=True`-only scope, so this field only ever
+    means something for the same rows that field is read from."""
 
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def patch(self, request):
         membership = getattr(request.user, 'office_membership', None)
-        if membership is None or membership.role != ROLE_OPERATOR:
+        if membership is None or not is_operator_role(request.user):
             return _error(request, 403, 'forbidden', 'Only an Operator may set their own availability.')
 
         serializer = OperatorAvailabilitySerializer(data=request.data)

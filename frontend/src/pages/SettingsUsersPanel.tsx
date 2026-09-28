@@ -16,31 +16,36 @@ import {
   type AdminUser,
   type Me,
   type Office,
-  type OfficeRole,
+  type Role,
 } from '../lib/djangoApi';
 import { useApiQuery } from '../lib/useApiQuery';
 import './SettingsPage.css';
 
-const ROLE_LABEL: Record<OfficeRole, string> = {
-  global_admin: 'Global Admin',
-  office_admin: 'Office Admin',
-  operator: 'Operator',
-};
-
-// Step 6 (User management). `me` decides what this admin is allowed to
-// pick: a globally-accessing user (Superadmin/Global Admin) may choose
-// any role/Office; an Office Admin is restricted server-side to
-// office_admin/operator within their own Office — this panel mirrors
-// that in the form (no Global Admin option, no Office picker) purely as
-// UX guidance; the backend remains the actual boundary regardless.
+// The Role merge — `role` is now the ONE field carrying both
+// organizational standing (Office-scoping/administrative authority) and
+// feature/menu access, replacing what used to be a fixed 3-value enum
+// (Office role) plus a separate "Custom Role" picker. `me` decides what
+// this admin is allowed to pick: a globally-accessing user (Superadmin/
+// Global Admin) may choose any Role/Office, including one with
+// `grants_global_access`; an Office Admin may pick any Role EXCEPT one
+// with `grants_global_access` (server-enforced in
+// UserListCreateView.post/UserDetailView.patch) — this panel mirrors
+// that in the form purely as UX guidance; the backend remains the
+// actual boundary regardless.
 export function SettingsUsersPanel({
   me,
   users,
   offices,
+  roles,
 }: {
   me: Me;
   users: ReturnType<typeof useApiQuery<AdminUser[]>>;
   offices: Office[];
+  /** The Role catalog — readable by Superadmin, Global Admin, AND Office
+   * Admin (`RoleListCreateView.get`'s `_admin_scope` check), since even
+   * an Office Admin needs it to populate this picker now that Role is
+   * dynamic. */
+  roles: Role[];
 }) {
   const [modalUser, setModalUser] = useState<AdminUser | 'new' | null>(null);
   const canPickGlobalAdmin = me.has_global_access;
@@ -83,7 +88,7 @@ export function SettingsUsersPanel({
                   <tr key={user.id}>
                     <td>{user.username}</td>
                     <td>{[user.first_name, user.last_name].filter(Boolean).join(' ') || '—'}</td>
-                    <td>{user.is_superuser ? 'Superadmin' : user.role ? ROLE_LABEL[user.role] : '—'}</td>
+                    <td>{user.is_superuser ? 'Superadmin' : (user.role?.name ?? '—')}</td>
                     <td>{user.office?.name ?? '—'}</td>
                     <td>
                       <Badge tone={user.is_active ? 'success' : 'neutral'}>{user.is_active ? 'Active' : 'Inactive'}</Badge>
@@ -106,6 +111,7 @@ export function SettingsUsersPanel({
       <UserFormModal
         user={modalUser}
         offices={offices}
+        roles={roles}
         canPickGlobalAdmin={canPickGlobalAdmin}
         canPickOffice={canPickOffice}
         defaultOffice={me.office}
@@ -122,6 +128,7 @@ export function SettingsUsersPanel({
 function UserFormModal({
   user,
   offices,
+  roles,
   canPickGlobalAdmin,
   canPickOffice,
   defaultOffice,
@@ -130,6 +137,7 @@ function UserFormModal({
 }: {
   user: AdminUser | 'new' | null;
   offices: Office[];
+  roles: Role[];
   canPickGlobalAdmin: boolean;
   canPickOffice: boolean;
   defaultOffice: { id: number; name: string } | null;
@@ -144,6 +152,7 @@ function UserFormModal({
         key={openKey}
         user={user}
         offices={offices}
+        roles={roles}
         canPickGlobalAdmin={canPickGlobalAdmin}
         canPickOffice={canPickOffice}
         defaultOffice={defaultOffice}
@@ -157,6 +166,7 @@ function UserFormModal({
 function UserForm({
   user,
   offices,
+  roles,
   canPickGlobalAdmin,
   canPickOffice,
   defaultOffice,
@@ -165,6 +175,7 @@ function UserForm({
 }: {
   user: AdminUser | 'new' | null;
   offices: Office[];
+  roles: Role[];
   canPickGlobalAdmin: boolean;
   canPickOffice: boolean;
   defaultOffice: { id: number; name: string } | null;
@@ -179,18 +190,27 @@ function UserForm({
   const [firstName, setFirstName] = useState(editing?.first_name ?? '');
   const [lastName, setLastName] = useState(editing?.last_name ?? '');
   const [isActive, setIsActive] = useState(editing?.is_active ?? true);
-  const [role, setRole] = useState<OfficeRole>(editing?.role ?? 'operator');
+  // Roles this actor may pick from at all — an Office Admin may never
+  // select one with `grants_global_access` (server-enforced regardless;
+  // this only avoids offering a choice that will just 403).
+  const pickableRoles = canPickGlobalAdmin ? roles : roles.filter((r) => !r.grants_global_access);
+  const [roleId, setRoleId] = useState<number | ''>(editing?.role?.id ?? '');
   const [officeId, setOfficeId] = useState<number | ''>(editing?.office?.id ?? defaultOffice?.id ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
-  const officeRequired = role !== 'global_admin';
+  const selectedRole = pickableRoles.find((r) => r.id === roleId) ?? null;
+  const officeRequired = selectedRole !== null ? !selectedRole.grants_global_access : true;
   const showOfficePicker = canPickOffice && officeRequired;
 
   async function handleSubmit() {
     if (busy) return;
+    if (roleId === '') {
+      setError({ kind: 'validation', message: 'A Role is required.' });
+      return;
+    }
     if (officeRequired && canPickOffice && officeId === '') {
-      setError({ kind: 'validation', message: 'An Office is required for this role.' });
+      setError({ kind: 'validation', message: 'An Office is required for this Role.' });
       return;
     }
     setBusy(true);
@@ -202,7 +222,7 @@ function UserForm({
         password,
         first_name: firstName.trim(),
         last_name: lastName.trim(),
-        role,
+        role: roleId,
         office: officeRequired ? (officeId === '' ? undefined : officeId) : null,
       });
       setBusy(false);
@@ -219,7 +239,7 @@ function UserForm({
       last_name: lastName.trim(),
       is_active: isActive,
       ...(password ? { password } : {}),
-      role,
+      role: roleId,
       office: officeRequired ? (officeId === '' ? null : officeId) : null,
     });
     setBusy(false);
@@ -256,14 +276,21 @@ function UserForm({
         <span className="wa-settings-form__label">Role</span>
         <select
           className="wa-settings-form__select"
-          value={role}
-          onChange={(e) => setRole(e.target.value as OfficeRole)}
+          value={roleId}
+          onChange={(e) => setRoleId(e.target.value ? Number(e.target.value) : '')}
           disabled={busy}
         >
-          {canPickGlobalAdmin ? <option value="global_admin">Global Admin</option> : null}
-          <option value="office_admin">Office Admin</option>
-          <option value="operator">Operator</option>
+          <option value="">Select a Role…</option>
+          {pickableRoles.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.name}
+            </option>
+          ))}
         </select>
+        <p className="wa-settings-form__hint">
+          Decides both Office-scoping/administrative authority and which menus/features this account can use
+          (Settings → Roles).
+        </p>
       </div>
 
       {showOfficePicker ? (
@@ -286,7 +313,7 @@ function UserForm({
       ) : officeRequired ? (
         <p className="wa-settings-form__hint">Office: {defaultOffice?.name ?? '—'} (your own Office)</p>
       ) : (
-        <p className="wa-settings-form__hint">A Global Admin has no Office.</p>
+        <p className="wa-settings-form__hint">A Role with global access has no Office.</p>
       )}
 
       {error ? <ErrorState error={error} /> : null}

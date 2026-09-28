@@ -8,7 +8,7 @@ from rest_framework.test import APITestCase
 from apps.authn.jwt_utils import issue_access_token
 from apps.authn.tests.keys import generate_test_key_pair
 from apps.chats.models import Chat, Contact, MediaReference, Message
-from apps.offices.models import Office, OfficeMembership, ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR
+from apps.offices.models import Office, OfficeMembership, ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Role
 from apps.waha_sessions.models import WahaSession
 
 PRIVATE_PEM, PUBLIC_PEM = generate_test_key_pair()
@@ -18,6 +18,22 @@ PRIVATE_PEM, PUBLIC_PEM = generate_test_key_pair()
 # all"), the same idiom apps/blast/tests/test_views.py already uses for its
 # own `_user`/`_create_campaign` helpers.
 _DEFAULT_OFFICE = object()
+
+# The Role merge — resolves the old CharField's three fixed string
+# values to the migration-0009-seeded Role rows with the matching
+# organizational flags, so the helpers below keep accepting the same
+# ROLE_GLOBAL_ADMIN/ROLE_OFFICE_ADMIN/ROLE_OPERATOR constants every
+# existing test call site already passes them.
+def _seeded_role(name):
+    role, _ = Role.objects.get_or_create(
+        name=name,
+        defaults={
+            'grants_global_access': name == ROLE_GLOBAL_ADMIN,
+            'is_office_admin': name == ROLE_OFFICE_ADMIN,
+            'is_operator': name == ROLE_OPERATOR,
+        },
+    )
+    return role
 
 
 @override_settings(
@@ -56,11 +72,16 @@ class ChatsApiTestCase(APITestCase):
         group, _ = Group.objects.get_or_create(name='reading')
         user.groups.add(group)
         if role == ROLE_GLOBAL_ADMIN:
-            OfficeMembership.objects.create(user=user, office=None, role=ROLE_GLOBAL_ADMIN)
+            OfficeMembership.objects.create(
+                user=user, office=None, role=_seeded_role(ROLE_GLOBAL_ADMIN), requires_office=False
+            )
         else:
             actual_office = self.office if office is _DEFAULT_OFFICE else office
             if actual_office is not None:
-                OfficeMembership.objects.create(user=user, office=actual_office, role=role)
+                role_obj = _seeded_role(role)
+                OfficeMembership.objects.create(
+                    user=user, office=actual_office, role=role_obj, requires_office=not role_obj.grants_global_access
+                )
         return user
 
     def _no_scope_user(self, username='noscope'):
@@ -424,10 +445,15 @@ class ChatRoleWithoutReadingScopeTests(ChatOfficeIsolationTests):
         # Deliberately NOT adding the 'reading' Group — this is the whole
         # point of this test class.
         if role == ROLE_GLOBAL_ADMIN:
-            OfficeMembership.objects.create(user=user, office=None, role=ROLE_GLOBAL_ADMIN)
+            OfficeMembership.objects.create(
+                user=user, office=None, role=_seeded_role(ROLE_GLOBAL_ADMIN), requires_office=False
+            )
         else:
             actual_office = self.office if office is _DEFAULT_OFFICE else office
-            OfficeMembership.objects.create(user=user, office=actual_office, role=role)
+            role_obj = _seeded_role(role)
+            OfficeMembership.objects.create(
+                user=user, office=actual_office, role=role_obj, requires_office=not role_obj.grants_global_access
+            )
         return user
 
     def test_office_admin_without_reading_scope_can_list_own_office_chats(self):

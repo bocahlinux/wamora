@@ -10,14 +10,33 @@ import './Sidebar.css';
 
 // Navigation order and icon mapping taken directly from
 // wamora-design-assets/docs/WAMORA-FRONTEND-DESIGN-SPEC.md Sections 6/7.
+//
+// Dynamic Role-based menu access — `requiredScope`, when present, must be
+// one of the caller's JWT `scopes` (from the same Role-driven Group sync
+// every backend/BFF check already reads — apps.offices.serializers's
+// `_sync_role_groups`) for the item to render at all. `dashboard`/
+// `sessions` -> 'reading' mirrors `HasReadingScope`/the BFF session-status
+// route; `blast` -> 'blast' mirrors `HasBlastScope`. `whatsapp`/`reports`
+// have no backing API at all yet (both are still placeholders — nothing
+// to protect), so they stay unconditional. `inbox` isn't scope-gated at
+// all backend-side (`HasOfficeAccess` checks Office
+// role/membership instead, a deliberately separate axis — see
+// apps/authn/permissions.py's own docstring) — its visibility below uses
+// `me.has_global_access || me.role !== null` instead of `requiredScope`.
+//
+// This is UX only — hiding an item a caller's token doesn't cover never
+// replaces the server-side check (`lib/auth.ts`'s own decodeToken()
+// docstring: "the frontend must never make a security decision based on
+// this decoded value alone"); every route still enforces itself
+// regardless of what this Sidebar shows.
 const NAV_ITEMS = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
-  { to: '/whatsapp', label: 'WhatsApp', icon: MessageCircle, end: false },
-  { to: '/inbox', label: 'Inbox', icon: Inbox, end: false },
-  { to: '/sessions', label: 'Sessions', icon: Smartphone, end: false },
-  { to: '/blast', label: 'Blast', icon: Megaphone, end: false },
-  { to: '/reports', label: 'Reports', icon: BarChart3, end: false },
-  { to: '/settings', label: 'Settings', icon: Settings, end: false },
+  { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true, requiredScope: 'reading' },
+  { to: '/whatsapp', label: 'WhatsApp', icon: MessageCircle, end: false, requiredScope: null },
+  { to: '/inbox', label: 'Inbox', icon: Inbox, end: false, requiredScope: null, requiresOfficeAccess: true },
+  { to: '/sessions', label: 'Sessions', icon: Smartphone, end: false, requiredScope: 'reading' },
+  { to: '/blast', label: 'Blast', icon: Megaphone, end: false, requiredScope: 'blast' },
+  { to: '/reports', label: 'Reports', icon: BarChart3, end: false, requiredScope: null },
+  { to: '/settings', label: 'Settings', icon: Settings, end: false, requiredScope: null },
 ] as const;
 
 interface SidebarProps {
@@ -28,13 +47,22 @@ interface SidebarProps {
 }
 
 export function Sidebar({ collapsed, onToggleCollapsed, mobileOpen, onCloseMobile }: SidebarProps) {
-  const { logout } = useAuth();
+  const { logout, claims } = useAuth();
   // GET /api/auth/me/ (docs/generated/PHASE-8-DASHBOARD-BACKEND-FOUNDATION-REPORT.md)
   // replaces the placeholder "Signed in" text with the real caller
   // identity. Loading/error both keep showing that same neutral label —
   // never a fabricated name — rather than adding a spinner to this
-  // compact footer.
+  // compact footer. Also feeds the Inbox item's Office-access check
+  // below (`requiresOfficeAccess`) — this is the one already-fetched
+  // query that has that data, no second call.
   const meQuery = useApiQuery(() => getMe(), []);
+  const scopes = claims?.scopes ?? [];
+  const hasOfficeAccess = meQuery.status === 'success' && (meQuery.data.has_global_access || meQuery.data.role !== null);
+  const visibleNavItems = NAV_ITEMS.filter((item) => {
+    if ('requiresOfficeAccess' in item && item.requiresOfficeAccess) return hasOfficeAccess;
+    if (item.requiredScope !== null) return scopes.includes(item.requiredScope);
+    return true;
+  });
 
   return (
     <>
@@ -51,7 +79,7 @@ export function Sidebar({ collapsed, onToggleCollapsed, mobileOpen, onCloseMobil
         </div>
 
         <nav className="wa-sidebar__nav" aria-label="Primary">
-          {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
+          {visibleNavItems.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}

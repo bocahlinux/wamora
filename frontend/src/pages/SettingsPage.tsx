@@ -4,15 +4,16 @@ import { Settings } from 'lucide-react';
 import { ErrorState } from '../components/ui/ErrorState';
 import { LoadingState } from '../components/ui/LoadingState';
 import { PageHeader } from '../components/ui/PageHeader';
-import { getMe, getOffices, getUsers, type Me } from '../lib/djangoApi';
+import { getMe, getOffices, getRoles, getUsers, type Me } from '../lib/djangoApi';
 import { useApiQuery } from '../lib/useApiQuery';
 import { PlaceholderPage } from './PlaceholderPage';
 import { SettingsInboxConfigPanel } from './SettingsInboxConfigPanel';
 import { SettingsOfficesPanel } from './SettingsOfficesPanel';
+import { SettingsRolesPanel } from './SettingsRolesPanel';
 import { SettingsUsersPanel } from './SettingsUsersPanel';
 import './SettingsPage.css';
 
-type Tab = 'offices' | 'users' | 'inbox-config';
+type Tab = 'offices' | 'users' | 'inbox-config' | 'roles';
 
 // Step 6 (Office & User management) — the only functional Settings
 // content so far; anything else stays the same "not yet available"
@@ -43,7 +44,7 @@ export function SettingsPage() {
   }
 
   const me = meQuery.data;
-  const canAdminister = me.has_global_access || me.role === 'office_admin';
+  const canAdminister = me.has_global_access || (me.role?.is_office_admin ?? false);
 
   if (!canAdminister) {
     return (
@@ -63,6 +64,12 @@ function AdministrationSettings({ hasGlobalAccess, me }: { hasGlobalAccess: bool
   const [tab, setTab] = useState<Tab>(hasGlobalAccess ? 'offices' : 'users');
   const officesQuery = useApiQuery(() => getOffices(), []);
   const usersQuery = useApiQuery(() => getUsers(), []);
+  // Roles CRUD (`/api/roles/`) is Superuser-only server-side
+  // (`IsSuperuser`) — not even Global Admin reaches it, so this tab (and
+  // its query result) is gated on `me.is_superuser` specifically below,
+  // same "always fetch, gate the render" pattern `officesQuery` above
+  // already uses for a non-globally-accessing Office Admin.
+  const rolesQuery = useApiQuery(() => getRoles(), []);
 
   return (
     <div>
@@ -98,6 +105,17 @@ function AdministrationSettings({ hasGlobalAccess, me }: { hasGlobalAccess: bool
         >
           Inbox Configuration
         </button>
+        {me.is_superuser ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'roles'}
+            className={['wa-settings-tab', tab === 'roles' ? 'wa-settings-tab--active' : ''].filter(Boolean).join(' ')}
+            onClick={() => setTab('roles')}
+          >
+            Roles
+          </button>
+        ) : null}
       </div>
 
       {tab === 'offices' && hasGlobalAccess ? (
@@ -112,6 +130,11 @@ function AdministrationSettings({ hasGlobalAccess, me }: { hasGlobalAccess: bool
             me={me}
             users={usersQuery}
             offices={officesQuery.status === 'success' ? officesQuery.data : []}
+            // Only a globally-accessing actor can assign a Role at all
+            // (backend 403s an Office Admin who even sends the field) —
+            // reuses the same rolesQuery this page already fetches for
+            // the Roles tab, rather than a second /api/roles/ call.
+            roles={hasGlobalAccess && rolesQuery.status === 'success' ? rolesQuery.data : []}
           />
         )
       ) : null}
@@ -123,6 +146,8 @@ function AdministrationSettings({ hasGlobalAccess, me }: { hasGlobalAccess: bool
           <SettingsInboxConfigPanel me={me} offices={officesQuery.status === 'success' ? officesQuery.data : []} />
         )
       ) : null}
+
+      {tab === 'roles' && me.is_superuser ? <SettingsRolesPanel roles={rolesQuery} /> : null}
     </div>
   );
 }

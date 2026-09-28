@@ -255,7 +255,7 @@ class OfficeRoutedInboxVisibilityTests(TestCase):
     def setUp(self):
         from django.contrib.auth.models import User
 
-        from apps.offices.models import ROLE_OFFICE_ADMIN, OfficeMembership
+        from apps.offices.models import OfficeMembership, Role
 
         self.office_a = Office.objects.create(name='Samsat Palangka Raya')
         self.office_b = Office.objects.create(name='Samsat Kasongan')
@@ -268,7 +268,8 @@ class OfficeRoutedInboxVisibilityTests(TestCase):
         self.chat_b = Chat.objects.get(session=self.session_b, provider_chat_id='cb@lid')
 
         self.admin_a = User.objects.create_user('admin_a_e2e', password='pw')
-        OfficeMembership.objects.create(user=self.admin_a, office=self.office_a, role=ROLE_OFFICE_ADMIN)
+        role = Role.objects.create(name='Office Admin', is_office_admin=True)
+        OfficeMembership.objects.create(user=self.admin_a, office=self.office_a, role=role, requires_office=True)
         self.superuser = User.objects.create_superuser('super_e2e', 'super_e2e@example.com', 'pw')
 
     def test_office_admin_sees_own_office_chat_from_real_ingestion(self):

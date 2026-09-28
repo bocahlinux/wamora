@@ -492,12 +492,13 @@ class SyncCheckpointRecoveryViewTests(APITestCase):
         # SyncCheckpointRecoveryView was deliberately NOT touched, so a
         # real Office Admin — same organizational role, still no
         # 'system administration' Group — must remain denied here.
-        from apps.offices.models import ROLE_OFFICE_ADMIN, Office, OfficeMembership
+        from apps.offices.models import Office, OfficeMembership, Role
 
         self._stale_running_checkpoint()
         user = self._plain_user('officeadmin_roleonly')
         office = Office.objects.create(name='Office A')
-        OfficeMembership.objects.create(user=user, office=office, role=ROLE_OFFICE_ADMIN)
+        role = Role.objects.create(name='Office Admin', is_office_admin=True)
+        OfficeMembership.objects.create(user=user, office=office, role=role, requires_office=True)
         response = self.client.post(self._url(), **self._auth_header(user))
         self.assertEqual(response.status_code, 403)
         checkpoint = SyncCheckpoint.objects.get(session=self.session)

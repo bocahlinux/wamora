@@ -14,11 +14,12 @@ only answers office/role/access questions, never business permissions.
 
 Does not touch `apps.authn.jwt_utils.compute_scopes()`, JWT issuance/
 verification, or `django.contrib.auth.models.Group` — scope (a
-technical permission claim) and office/role (an organizational fact)
-remain two independent axes, exactly as Step 2 established.
+technical permission claim) and office/organizational-standing (both now
+read from the same `OfficeMembership.role` -> `Role` row, per that
+model's own docstring) remain two independent axes read independently:
+this module never looks at `Role.scopes`, only at
+`.grants_global_access`/`.is_office_admin`/`.is_operator`.
 """
-
-from apps.offices.models import ROLE_GLOBAL_ADMIN
 
 
 def _authenticated(user) -> bool:
@@ -42,7 +43,30 @@ def is_superadmin(user) -> bool:
 
 def is_global_admin(user) -> bool:
     membership = _membership(user)
-    return membership is not None and membership.role == ROLE_GLOBAL_ADMIN
+    return membership is not None and membership.role.grants_global_access
+
+
+def is_office_admin_role(user) -> bool:
+    """TRUE for a real `OfficeMembership` whose `Role` carries
+    `is_office_admin` — administrative authority WITHIN that user's own
+    Office (Blast approve/reject, chat assignment). Named with the
+    `_role` suffix to avoid colliding with `Role.is_office_admin`, the
+    field itself. Deliberately does NOT also return True for
+    `has_global_access(user)` — every existing caller
+    (`HasOfficeAdminAccess`, `_admin_scope()`) already ORs this together
+    with a separate `has_global_access` check itself, same as before this
+    merge."""
+    membership = _membership(user)
+    return membership is not None and membership.role.is_office_admin
+
+
+def is_operator_role(user) -> bool:
+    """TRUE for a real `OfficeMembership` whose `Role` carries
+    `is_operator` — eligible as a chat-assignment target and may toggle
+    their own availability (`apps.chats.assignment`,
+    `OperatorAvailabilityView`)."""
+    membership = _membership(user)
+    return membership is not None and membership.role.is_operator
 
 
 def get_user_office(user):

@@ -7,8 +7,13 @@ and unrelated to `apps.chats.models.Chat.is_group` (a WhatsApp group
 chat) — reusing either name/model here would conflate three unrelated
 meanings of "group" in one codebase.
 
-No Role/permission model, no Blast/Inbox wiring, no API/UI — those are
-later steps. This is data-model foundation only.
+Originally no Role/permission model was planned — that decision was
+deliberately revisited (see `Role` below): organizational standing
+(global vs Office-scoped, administrative authority, operator/assignment
+eligibility) and feature/menu access used to be two separate concepts
+(a fixed `role` enum here, plus a separate superadmin-managed `Role`) and
+are now merged into the one `Role` model every `OfficeMembership` points
+at.
 """
 
 from django.conf import settings
@@ -17,13 +22,18 @@ from django.db.models import Q
 
 from apps.core.models import TimeStampedModel
 
-# Step 2 (role/permission architecture) — module-level, not class
-# attributes, so both `OfficeMembership.ROLE_CHOICES` and the
-# `Meta.constraints` Q objects below can share exactly one spelling
-# (same convention as `apps.blast.models.OPERATION_TYPE_BLAST_SEND`:
-# a nested `Meta` class can't see its outer class's own attributes at
-# class-body-evaluation time, so these can't live on OfficeMembership
-# itself).
+# The three seeded, built-in Roles' `name` values (created by
+# migration 0009) — kept as module-level constants purely so existing
+# code/tests that need "the built-in Global Admin/Office Admin/Operator
+# Role" can look one up by a stable name
+# (`Role.objects.get(name=ROLE_OFFICE_ADMIN)`) rather than a magic
+# string repeated everywhere. These are NOT enum values on
+# `OfficeMembership` any more — a membership's actual organizational
+# standing comes entirely from whichever `Role` row its `role` FK points
+# at (see `Role.grants_global_access`/`.is_office_admin`/`.is_operator`
+# below), which a Superadmin can freely edit, rename, or combine — these
+# three seeded rows are just the ones migrated data started out pointing
+# at, not a fixed vocabulary the system enforces.
 ROLE_GLOBAL_ADMIN = 'global_admin'
 ROLE_OFFICE_ADMIN = 'office_admin'
 ROLE_OPERATOR = 'operator'
@@ -41,45 +51,78 @@ class Office(TimeStampedModel):
         return self.name
 
 
+class Role(TimeStampedModel):
+    """Superadmin-managed bundle covering BOTH axes every
+    `OfficeMembership` used to answer with two separate fields:
+
+      - Feature/menu access — `scopes`, a JSON list of strings validated
+        by `RoleSerializer` to be a subset of `settings.JWT_SCOPES` —
+        never freeform, so a Role can only ever grant a capability the
+        backend genuinely enforces somewhere (`apps.authn.permissions`/
+        the BFF's `requireScope`), not an invented one.
+      - Organizational standing — `grants_global_access`/
+        `is_office_admin`/`is_operator`, three independent booleans (not
+        a re-creation of the old fixed 3-value enum) that replace what
+        `OfficeMembership.role == 'global_admin'/'office_admin'/
+        'operator'` used to mean. `apps.offices.authorization` is the
+        ONE place that reads these — every other check
+        (`HasOfficeAdminAccess`, `apps.chats.assignment`, Blast
+        authorization, self-escalation guards in `views.py`) calls into
+        that module, never compares these flags itself.
+
+    Independent booleans, not an enum, because a Superadmin-defined Role
+    is no longer required to be exactly one of three fixed shapes — e.g.
+    a Role can combine `is_operator=True` with `scopes=['sending']`,
+    something the old fixed enum could never express.
+
+    `on_delete=PROTECT` on `OfficeMembership.role` (not `SET_NULL`) —
+    deleting a Role that's still assigned to a user must be an explicit,
+    deliberate action (reassign or clear it first), matching this
+    project's existing convention for every other required-looking FK
+    (see `OfficeMembership.office`/`.user` below)."""
+
+    name = models.CharField(max_length=100, unique=True)
+    scopes = models.JSONField(default=list, blank=True)
+    grants_global_access = models.BooleanField(default=False)
+    is_office_admin = models.BooleanField(default=False)
+    is_operator = models.BooleanField(default=False)
+
+    def __str__(self):
+        return self.name
+
+
 class OfficeMembership(TimeStampedModel):
-    """User -> (optionally) Office, plus that user's organizational role
-    (Step 2 — role/permission architecture). `OneToOneField` on `user`
-    enforces "at most one Office per user" at the database level (per
-    the agreed Step 1 design) rather than an app-level convention.
+    """User -> (optionally) Office, plus that user's `Role` (feature
+    access AND organizational standing — see `Role`'s own docstring).
+    `OneToOneField` on `user` enforces "at most one Office per user" at
+    the database level (per the agreed Step 1 design) rather than an
+    app-level convention.
 
-    Office and role are deliberately two different questions ("where
+    Office and Role are deliberately two different questions ("where
     does this user work" vs. "what is their function") — this table
-    answers both, because `GLOBAL_ADMIN` answers the second without an
-    answer to the first: a Global Admin is not tied to any one Office,
-    so `office` is nullable and a `GLOBAL_ADMIN` row simply has no
-    Office set. `OFFICE_ADMIN`/`OPERATOR` are only meaningful *within*
-    a specific Office, so their rows always have one — enforced by the
-    `office_matches_role` constraint below, not just convention.
+    answers both, because a `Role` with `grants_global_access=True`
+    answers the second without an answer to the first: such a user is
+    not tied to any one Office, so `office` is nullable and that row
+    simply has no Office set. Every other Role is only meaningful
+    *within* a specific Office, so those rows always have one — enforced
+    by the `office_matches_role` constraint below via the denormalized
+    `requires_office` flag (see its own field comment for why a plain
+    `CheckConstraint` can no longer reference `role.grants_global_access`
+    directly now that `role` is a FK to a separate table).
 
-    SUPERADMIN is deliberately NOT a role value here — `User.is_superuser`
-    already answers that unambiguously (per this step's own brief: "tidak
-    perlu dibuat sebagai role database terpisah jika is_superuser ... sudah
-    cukup"); a superuser is exempt from this table entirely, exactly like
-    Step 1 already established, by simply never having a row.
+    SUPERADMIN is deliberately NOT representable by any `Role` here —
+    `User.is_superuser` already answers that unambiguously (per Step 2's
+    own brief: "tidak perlu dibuat sebagai role database terpisah jika
+    is_superuser ... sudah cukup"); a superuser is exempt from this table
+    entirely, by simply never having a row.
 
-    This intentionally does NOT touch `django.contrib.auth.models.Group`
-    or `apps.authn.jwt_utils.compute_scopes()` — Group remains solely the
-    existing JWT-scope mechanism; role here is a separate, organizational
-    axis, read directly from this model wherever a later step needs it
-    (Blast/Inbox authorization), not folded into the scope claim.
-
-    `on_delete=PROTECT` on both FKs, matching this project's existing
+    `on_delete=PROTECT` on every FK, matching this project's existing
     convention for required FKs to User/other core rows (e.g.
     `apps.blast.models.BlastCampaign.created_by`,
-    `apps.chats.models.Chat.session`) — deleting a User or an Office
-    that still has a membership must be an explicit, deliberate action
-    (remove the membership first), never an accidental cascade."""
-
-    ROLE_CHOICES = [
-        (ROLE_GLOBAL_ADMIN, 'Global Admin'),
-        (ROLE_OFFICE_ADMIN, 'Office Admin'),
-        (ROLE_OPERATOR, 'Operator'),
-    ]
+    `apps.chats.models.Chat.session`) — deleting a User, an Office, or a
+    Role that still has a membership must be an explicit, deliberate
+    action (remove/reassign the membership first), never an accidental
+    cascade."""
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='office_membership'
@@ -87,17 +130,32 @@ class OfficeMembership(TimeStampedModel):
     office = models.ForeignKey(
         Office, on_delete=models.PROTECT, related_name='memberships', null=True, blank=True
     )
-    role = models.CharField(max_length=32, choices=ROLE_CHOICES)
+    # Required (no `null=True`) — organizational standing and feature
+    # access are now the same object, so a membership with no Role has
+    # neither. `apps.offices.serializers._sync_role_groups` keeps the
+    # underlying Django Groups (and so the JWT `scopes` claim) in sync
+    # with whatever this points at every time it's assigned.
+    role = models.ForeignKey(Role, on_delete=models.PROTECT, related_name='memberships')
+    # Denormalized copy of `not role.grants_global_access`, kept in sync
+    # by `apps.offices.serializers._sync_role_groups` every time `role`
+    # is assigned — exists ONLY so `Meta.constraints` below can still
+    # enforce "Office required unless globally-accessing" at the
+    # database level. A plain SQL `CheckConstraint` can check two columns
+    # on THIS table but can't join to `role.grants_global_access` on the
+    # separate `Role` table — this column is the trade-off that keeps
+    # that DB-level guarantee instead of relying on application-level
+    # validation (`_validate_role_office`) alone.
+    requires_office = models.BooleanField()
     # Step 14 (Operator assignment & availability foundation) — a
     # deliberately separate concept from `User.is_active` (the Django
     # account itself) and from a membership row simply existing/matching
     # an Office (used throughout this codebase as "is this a current,
     # real membership"): `is_available` is the operator's own opt-in
     # signal that they are currently willing to receive a NEW Chat
-    # assignment. Meaningful only for `ROLE_OPERATOR` rows in practice
+    # assignment. Meaningful only when `role.is_operator` in practice
     # (see `apps.chats.assignment.valid_assignment_candidates`, which
-    # filters on role too) but kept on this shared table rather than a
-    # role-conditional model, matching every other field here.
+    # filters on that flag too) but kept on this shared table rather than
+    # a role-conditional model, matching every other field here.
     #
     # Default `False`, deliberately conservative: existing real
     # OfficeMembership rows (created before this field existed) must NOT
@@ -110,15 +168,15 @@ class OfficeMembership(TimeStampedModel):
         constraints = [
             models.CheckConstraint(
                 check=(
-                    Q(role=ROLE_GLOBAL_ADMIN, office__isnull=True)
-                    | Q(role__in=[ROLE_OFFICE_ADMIN, ROLE_OPERATOR], office__isnull=False)
+                    Q(requires_office=False, office__isnull=True)
+                    | Q(requires_office=True, office__isnull=False)
                 ),
                 name='office_matches_role',
             ),
         ]
 
     def __str__(self):
-        return f'{self.user_id} -> {self.office_id} ({self.role})'
+        return f'{self.user_id} -> {self.office_id} ({self.role_id})'
 
 
 class OfficeInboxConfig(TimeStampedModel):

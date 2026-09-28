@@ -259,8 +259,8 @@ export function InboxPage() {
   // controls, mirroring `canRecover` above's own established pattern.
   const meQuery = useApiQuery(() => getMe(), []);
   const canManageAssignment =
-    meQuery.status === 'success' && (meQuery.data.has_global_access || meQuery.data.role === 'office_admin');
-  const isOperator = meQuery.status === 'success' && meQuery.data.role === 'operator';
+    meQuery.status === 'success' && (meQuery.data.has_global_access || (meQuery.data.role?.is_office_admin ?? false));
+  const isOperator = meQuery.status === 'success' && (meQuery.data.role?.is_operator ?? false);
 
   const [assignModalOpen, setAssignModalOpen] = useState(false);
   const [operatorsState, setOperatorsState] = useState<

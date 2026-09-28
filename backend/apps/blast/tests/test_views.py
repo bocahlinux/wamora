@@ -8,7 +8,7 @@ from apps.audit.models import AuditLog
 from apps.authn.jwt_utils import issue_access_token
 from apps.authn.tests.keys import generate_test_key_pair
 from apps.blast.models import BlastCampaign, BlastRecipient, OPERATION_TYPE_BLAST_SEND
-from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership
+from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership, Role
 from apps.operations.models import OutboundOperation
 from apps.waha_sessions.models import WahaSession
 
@@ -18,6 +18,23 @@ PRIVATE_PEM, PUBLIC_PEM = generate_test_key_pair()
 # default test Office" from "explicitly no Office at all" for _user()/
 # _create_campaign() below, without a magic string/None ambiguity.
 _DEFAULT_OFFICE = object()
+
+# The Role merge — resolves the old CharField's three fixed string
+# values to the migration-0009-seeded Role rows with the matching
+# organizational flags (`grants_global_access`/`is_office_admin`/
+# `is_operator`), so `_user()` below keeps accepting the same
+# ROLE_GLOBAL_ADMIN/ROLE_OFFICE_ADMIN/ROLE_OPERATOR constants every
+# existing test call site already passes it.
+def _seeded_role(name):
+    role, _ = Role.objects.get_or_create(
+        name=name,
+        defaults={
+            'grants_global_access': name == ROLE_GLOBAL_ADMIN,
+            'is_office_admin': name == ROLE_OFFICE_ADMIN,
+            'is_operator': name == ROLE_OPERATOR,
+        },
+    )
+    return role
 
 
 @override_settings(
@@ -47,7 +64,10 @@ class BlastCampaignAPITestCase(APITestCase):
             user.groups.add(group)
         actual_office = self.office_a if office is _DEFAULT_OFFICE else office
         if actual_office is not None:
-            OfficeMembership.objects.create(user=user, office=actual_office, role=role)
+            role_obj = role if isinstance(role, Role) else _seeded_role(role)
+            OfficeMembership.objects.create(
+                user=user, office=actual_office, role=role_obj, requires_office=not role_obj.grants_global_access
+            )
         return user
 
     def _auth_header(self, user):
@@ -703,7 +723,9 @@ class BlastCampaignOfficeIsolationTests(BlastCampaignAPITestCase):
 
     def test_global_admin_sees_campaigns_from_every_office(self):
         global_admin = self._user('gadmin', scopes=['blast', 'system administration'], office=None)
-        OfficeMembership.objects.create(user=global_admin, office=None, role=ROLE_GLOBAL_ADMIN)
+        OfficeMembership.objects.create(
+            user=global_admin, office=None, role=_seeded_role(ROLE_GLOBAL_ADMIN), requires_office=False
+        )
         response = self.client.get('/api/blast/campaigns/', **self._auth_header(global_admin))
         ids = {c['id'] for c in response.data}
         self.assertIn(self.campaign_a_id, ids)
@@ -844,7 +866,9 @@ class BlastCampaignOfficeIsolationTests(BlastCampaignAPITestCase):
         # same pattern as the pre-existing
         # test_global_admin_sees_campaigns_from_every_office above.
         user = self._user(username, scopes=scopes, office=None)
-        OfficeMembership.objects.create(user=user, office=None, role=ROLE_GLOBAL_ADMIN)
+        OfficeMembership.objects.create(
+            user=user, office=None, role=_seeded_role(ROLE_GLOBAL_ADMIN), requires_office=False
+        )
         return user
 
     def test_global_admin_can_create_a_campaign_for_any_office(self):

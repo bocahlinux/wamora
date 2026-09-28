@@ -1,7 +1,13 @@
 """Office & User management — Step 6. Plain serializers over the existing
 `Office`/`OfficeMembership` models and the stock
-`django.contrib.auth.models.User` — no custom User model, no Role/
-Permission model (per Step 6's own constraints).
+`django.contrib.auth.models.User` — no custom User model.
+
+Step 6 originally also decided against a Role/Permission model; that
+decision is deliberately revisited by the `Role` model (a later, explicit
+request to make menu/feature access AND organizational standing
+Superadmin-editable rather than hardcoded, fully merging what used to be
+two separate fields into one) — see `Role`'s own docstring in
+`models.py`.
 
 Authorization ("who is allowed to see/create/edit what") is deliberately
 NOT here — it lives entirely in `views.py`, built from
@@ -17,52 +23,28 @@ own Office, no matter what the client sends — "jangan mempercayai Office
 arbitrary dari client" applies here exactly as it did for Blast.
 """
 
+from django.conf import settings
 from django.contrib.auth.models import Group, User
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, Office, OfficeInboxConfig, OfficeMembership
+from .models import Office, OfficeInboxConfig, OfficeMembership, Role
 
-# The 'user administration' JWT scope has been declared in
-# settings.JWT_SCOPES since early phases but never checked/granted by
-# anything until this step. A superuser gets every scope automatically
-# (compute_scopes()'s existing superuser bypass); a non-superuser
-# Global/Office Admin needs this Group to get it. Kept in sync here as a
-# side effect of setting/clearing an admin role, so a Global/Office Admin
-# created through this app's own API can use it immediately on their next
-# login — no separate manual `Group`-assignment command required. This
-# does not change `compute_scopes()`/JWT issuance itself, and does not use
-# Group to represent Office — it only completes the wiring of an
-# already-declared, already-designed-for scope.
-ADMIN_SCOPE_GROUP_NAME = 'user administration'
-
-# Step 8 (Role x Scope alignment) — 'blast' is the ONE additional Group
-# safe to sync directly from role: unlike 'reading' (also gates Dashboard/
-# Sessions-status) or 'system administration' (also gates Sync Recovery),
-# 'blast' is used ONLY by Blast list/create/detail/submit
-# (apps/blast/views.py) — no other feature reads it, so granting it to
-# Global/Office Admin carries no cross-domain leak. Blast APPROVE/REJECT
-# and Inbox read access are deliberately NOT granted via a Group here at
-# all — they go through `apps.authn.permissions.HasOfficeAdminAccess`/
-# `HasOfficeAccess` instead (role-checked directly, live, every request),
-# specifically so this function never needs to touch 'system
-# administration'/'reading' and never risks leaking Sync Recovery/
-# Dashboard/Sessions access as a side effect. Operator gets neither Group
-# (no Blast creation for Operator in Step 8, per explicit decision).
-ROLE_GROUPS = {
-    ROLE_GLOBAL_ADMIN: (ADMIN_SCOPE_GROUP_NAME, 'blast'),
-    ROLE_OFFICE_ADMIN: (ADMIN_SCOPE_GROUP_NAME, 'blast'),
-}
-
-# Every Group name this function ever assigns — also the exact set it
-# will remove if a role no longer warrants them (e.g. demoted to
-# Operator), so a role change never leaves a stale Group behind.
-_MANAGED_GROUP_NAMES = {ADMIN_SCOPE_GROUP_NAME, 'blast'}
-
-
-def _sync_admin_scope_group(user, role):
-    wanted = set(ROLE_GROUPS.get(role, ()))
-    for name in _MANAGED_GROUP_NAMES:
+# `_sync_role_groups` replaces the previous hardcoded `ROLE_GROUPS`
+# mapping (Global/Office Admin -> a fixed ('user administration', 'blast',
+# 'reading') bundle): a user's actual scope-Groups are now driven entirely
+# by whatever `Role` their `OfficeMembership.role` points at — a
+# Superadmin-editable replacement for what used to require a code change.
+# `settings.JWT_SCOPES` is still the fixed, already-enforced vocabulary
+# (`RoleSerializer.validate_scopes` below rejects anything outside it) —
+# this only changes WHO decides which of those 6 scopes a given user's
+# account carries, from a code constant to a `Role` row. Organizational
+# standing (`role.grants_global_access`/`.is_office_admin`/`.is_operator`)
+# is a separate concern, read only by `apps.offices.authorization` — this
+# function only ever touches scope-Groups.
+def _sync_role_groups(user, role):
+    wanted = set(role.scopes) if role is not None else set()
+    for name in settings.JWT_SCOPES:
         group, _ = Group.objects.get_or_create(name=name)
         if name in wanted:
             user.groups.add(group)
@@ -72,12 +54,13 @@ def _sync_admin_scope_group(user, role):
 
 def _validate_role_office(role, office):
     """Mirrors `OfficeMembership`'s own `office_matches_role`
-    CheckConstraint — checked here so a bad combination surfaces as a
-    normal 400, not a raw IntegrityError."""
-    if role == ROLE_GLOBAL_ADMIN and office is not None:
-        raise serializers.ValidationError({'office': 'A Global Admin must not have an Office.'})
-    if role != ROLE_GLOBAL_ADMIN and office is None:
-        raise serializers.ValidationError({'office': 'This role requires an Office.'})
+    CheckConstraint (via the denormalized `requires_office` — see that
+    field's own comment in models.py) — checked here so a bad combination
+    surfaces as a normal 400, not a raw IntegrityError."""
+    if role.grants_global_access and office is not None:
+        raise serializers.ValidationError({'office': 'A globally-accessing Role must not have an Office.'})
+    if not role.grants_global_access and office is None:
+        raise serializers.ValidationError({'office': 'This Role requires an Office.'})
 
 
 class OfficeSerializer(serializers.ModelSerializer):
@@ -91,6 +74,43 @@ class OfficeSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError('name must not be blank.')
         return value
+
+
+class RoleSerializer(serializers.ModelSerializer):
+    """CRUD shape for `Role` — reachable only via `IsSuperuser`-gated
+    views (`RoleListCreateView`/`RoleDetailView`), never via a scope, so
+    defining what a Role can grant — both `scopes` (feature/menu access)
+    AND `grants_global_access`/`is_office_admin`/`is_operator`
+    (organizational standing, the Role merge) — is never itself reachable
+    by someone who only holds a scope."""
+
+    class Meta:
+        model = Role
+        fields = [
+            'id', 'name', 'scopes', 'grants_global_access', 'is_office_admin', 'is_operator',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('name must not be blank.')
+        return value
+
+    def validate_scopes(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('scopes must be a list.')
+        unknown = sorted(set(value) - set(settings.JWT_SCOPES))
+        if unknown:
+            raise serializers.ValidationError(f'Unknown scope(s): {", ".join(unknown)}.')
+        # De-duplicated but order-preserving — a client resubmitting the
+        # same set twice (e.g. a checkbox form) never grows the list.
+        seen = []
+        for scope in value:
+            if scope not in seen:
+                seen.append(scope)
+        return seen
 
 
 class OfficeInboxConfigSerializer(serializers.ModelSerializer):
@@ -127,7 +147,17 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_role(self, obj):
         membership = getattr(obj, 'office_membership', None)
-        return membership.role if membership else None
+        if membership is None:
+            return None
+        role = membership.role
+        return {
+            'id': role.id,
+            'name': role.name,
+            'scopes': role.scopes,
+            'grants_global_access': role.grants_global_access,
+            'is_office_admin': role.is_office_admin,
+            'is_operator': role.is_operator,
+        }
 
     def get_office(self, obj):
         membership = getattr(obj, 'office_membership', None)
@@ -139,15 +169,16 @@ class UserSerializer(serializers.ModelSerializer):
 class UserCreateSerializer(serializers.Serializer):
     """POST /api/users/ — creates a Django `User` plus its
     `OfficeMembership` in one call. `context['actor_scope']` is either
-    the string `'global'` (Superadmin/Global Admin — any role/Office) or
-    an `Office` instance (an Office Admin's own Office — role restricted
-    to office_admin/operator, Office forced to that instance)."""
+    the string `'global'` (Superadmin/Global Admin — any Role/Office) or
+    an `Office` instance (an Office Admin's own Office — Role's
+    `grants_global_access` must be False, Office forced to that
+    instance)."""
 
     username = serializers.CharField(max_length=150)
     password = serializers.CharField(write_only=True, min_length=8)
     first_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
     last_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
-    role = serializers.ChoiceField(choices=OfficeMembership.ROLE_CHOICES)
+    role = serializers.PrimaryKeyRelatedField(queryset=Role.objects.all())
     office = serializers.PrimaryKeyRelatedField(queryset=Office.objects.all(), required=False, allow_null=True)
 
     def validate_username(self, value):
@@ -179,8 +210,10 @@ class UserCreateSerializer(serializers.Serializer):
         password = validated_data.pop('password')
         with transaction.atomic():
             user = User.objects.create_user(password=password, **validated_data)
-            OfficeMembership.objects.create(user=user, role=role, office=office)
-            _sync_admin_scope_group(user, role)
+            OfficeMembership.objects.create(
+                user=user, role=role, office=office, requires_office=not role.grants_global_access
+            )
+            _sync_role_groups(user, role)
         return user
 
 
@@ -205,7 +238,7 @@ class MembershipUpdateSerializer(serializers.Serializer):
     another Office) are enforced in `views.py`, not here — this only
     checks data validity."""
 
-    role = serializers.ChoiceField(choices=OfficeMembership.ROLE_CHOICES)
+    role = serializers.PrimaryKeyRelatedField(queryset=Role.objects.all())
     office = serializers.PrimaryKeyRelatedField(queryset=Office.objects.all(), allow_null=True)
 
     def validate(self, attrs):

@@ -138,19 +138,29 @@ class MeView(APIView):
             'is_superuser': user.is_superuser,
             'has_global_access': has_global_access(user),
             'office': {'id': office.pk, 'name': office.name} if office else None,
-            # Step 6 (Office & User management) — the smallest addition
-            # needed for the frontend to decide whether to show the
-            # Settings admin UI for an Office Admin too, not just a
-            # globally-accessing user (`has_global_access` alone doesn't
-            # cover that case). `None` for a Superadmin/Operator/no
-            # membership at all.
-            'role': membership.role if membership else None,
+            # Step 6 (Office & User management), extended by the Role
+            # merge — the smallest addition needed for the frontend to
+            # decide whether to show the Settings admin UI for an Office
+            # Admin too, not just a globally-accessing user
+            # (`has_global_access` alone doesn't cover that case), now via
+            # `role.is_office_admin`. `None` for a Superadmin or anyone
+            # without a membership row at all. `scopes` is included so the
+            # frontend need not separately fetch the Role to know what
+            # this account's own Role grants.
+            'role': {
+                'id': membership.role_id,
+                'name': membership.role.name,
+                'scopes': membership.role.scopes,
+                'grants_global_access': membership.role.grants_global_access,
+                'is_office_admin': membership.role.is_office_admin,
+                'is_operator': membership.role.is_operator,
+            } if membership else None,
             # Step 14 (Operator assignment & availability foundation) —
             # the smallest addition needed for the frontend to render the
             # operator's OWN current availability toggle correctly on
             # load, instead of guessing/defaulting it locally. `None` for
             # anyone without a membership row (including Superadmin) —
-            # meaningful only alongside `role == 'operator'`, same as
+            # meaningful only alongside `role.is_operator`, same as
             # every other membership-only field here.
             'is_available': membership.is_available if membership else None,
         })

@@ -15,7 +15,16 @@ from rest_framework.test import APITestCase
 from apps.authn.jwt_utils import issue_access_token
 from apps.authn.tests.keys import generate_test_key_pair
 from apps.blast.models import BlastCampaign
-from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership
+from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership, Role
+
+# The three seeded built-in Roles (migration 0009) — resolved by name on
+# first use per test run and cached module-level Role instances would go
+# stale across TestCase-per-test DB rollbacks, so this looks them up
+# fresh via `get_or_create` every time instead (cheap; DB rows already
+# exist from migrations, so this is always a plain `get`).
+def _seeded_role(name, **flags):
+    role, _ = Role.objects.get_or_create(name=name, defaults=flags)
+    return role
 from apps.waha_sessions.models import WahaSession
 
 PRIVATE_PEM, PUBLIC_PEM = generate_test_key_pair()
@@ -34,6 +43,19 @@ class OfficesUsersApiTestCase(APITestCase):
     def setUp(self):
         self.office_a = Office.objects.create(name='Office A')
         self.office_b = Office.objects.create(name='Office B')
+        # The three seeded built-in Roles (migration 0009) — API payloads
+        # send a Role id now, not the old CharField's string value, so
+        # every `{'role': ROLE_X, ...}` payload literal below uses
+        # `self.role_x.pk` instead of the bare `ROLE_X` string constant
+        # (which stays valid as a plain Python value for `_user()`'s own
+        # `role=` kwarg — see its own comment for why).
+        self.role_global_admin = _seeded_role(
+            ROLE_GLOBAL_ADMIN, grants_global_access=True, scopes=[ADMIN_SCOPE, BLAST_SCOPE, 'reading']
+        )
+        self.role_office_admin = _seeded_role(
+            ROLE_OFFICE_ADMIN, is_office_admin=True, scopes=[ADMIN_SCOPE, BLAST_SCOPE, 'reading']
+        )
+        self.role_operator = _seeded_role(ROLE_OPERATOR, is_operator=True, scopes=[])
 
     def _user(self, username, scopes=(), office=None, role=None, superuser=False):
         if superuser:
@@ -44,7 +66,22 @@ class OfficesUsersApiTestCase(APITestCase):
             group, _ = Group.objects.get_or_create(name=scope)
             user.groups.add(group)
         if role is not None:
-            OfficeMembership.objects.create(user=user, office=office, role=role)
+            # Accepts either a `Role` instance (a test building a custom
+            # combination of flags) or one of the three seeded built-in
+            # names (ROLE_GLOBAL_ADMIN/ROLE_OFFICE_ADMIN/ROLE_OPERATOR) —
+            # the old CharField's exact values, now resolved to the
+            # migration-0009-seeded Role with the matching flags, for
+            # every test call site that predates this merge.
+            role_obj = role if isinstance(role, Role) else _seeded_role(
+                role,
+                grants_global_access=(role == ROLE_GLOBAL_ADMIN),
+                is_office_admin=(role == ROLE_OFFICE_ADMIN),
+                is_operator=(role == ROLE_OPERATOR),
+                scopes=[ADMIN_SCOPE, BLAST_SCOPE, 'reading'] if role in (ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN) else [],
+            )
+            OfficeMembership.objects.create(
+                user=user, office=office, role=role_obj, requires_office=not role_obj.grants_global_access
+            )
         return user
 
     def _auth_header(self, user):
@@ -151,7 +188,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         payload = {
             'username': 'newuser',
             'password': 'a-strong-password',
-            'role': ROLE_OPERATOR,
+            'role': self.role_operator.pk,
             'office': self.office_a.pk,
         }
         payload.update(overrides)
@@ -211,7 +248,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._office_admin('officeadmin_a', self.office_a)
         response = self.client.post(
             '/api/users/',
-            self._create_payload(username='sneaky', role=ROLE_GLOBAL_ADMIN, office=None),
+            self._create_payload(username='sneaky', role=self.role_global_admin.pk, office=None),
             format='json',
             **self._auth_header(actor),
         )
@@ -232,7 +269,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._superadmin()
         response = self.client.post(
             '/api/users/',
-            self._create_payload(role=ROLE_OFFICE_ADMIN, office=None),
+            self._create_payload(role=self.role_office_admin.pk, office=None),
             format='json',
             **self._auth_header(actor),
         )
@@ -242,7 +279,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._superadmin()
         response = self.client.post(
             '/api/users/',
-            self._create_payload(role=ROLE_GLOBAL_ADMIN, office=self.office_a.pk),
+            self._create_payload(role=self.role_global_admin.pk, office=self.office_a.pk),
             format='json',
             **self._auth_header(actor),
         )
@@ -280,20 +317,20 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._office_admin('officeadmin_a', self.office_a)
         response = self.client.patch(
             f'/api/users/{target.pk}/',
-            {'role': ROLE_GLOBAL_ADMIN, 'office': None},
+            {'role': self.role_global_admin.pk, 'office': None},
             format='json',
             **self._auth_header(actor),
         )
         self.assertEqual(response.status_code, 403)
         target.refresh_from_db()
-        self.assertEqual(target.office_membership.role, ROLE_OPERATOR)
+        self.assertEqual(target.office_membership.role_id, self.role_operator.pk)
 
     def test_office_admin_cannot_move_a_user_to_another_office(self):
         target = self._operator('operator_a', self.office_a)
         actor = self._office_admin('officeadmin_a', self.office_a)
         response = self.client.patch(
             f'/api/users/{target.pk}/',
-            {'role': ROLE_OPERATOR, 'office': self.office_b.pk},
+            {'role': self.role_operator.pk, 'office': self.office_b.pk},
             format='json',
             **self._auth_header(actor),
         )
@@ -306,7 +343,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._global_admin()
         response = self.client.patch(
             f'/api/users/{target.pk}/',
-            {'role': ROLE_OPERATOR, 'office': self.office_b.pk},
+            {'role': self.role_operator.pk, 'office': self.office_b.pk},
             format='json',
             **self._auth_header(actor),
         )
@@ -365,7 +402,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         target = self._operator('operator_a', self.office_a)
         actor = self._superadmin()
         response = self.client.patch(
-            f'/api/users/{target.pk}/', {'role': ROLE_OPERATOR}, format='json', **self._auth_header(actor)
+            f'/api/users/{target.pk}/', {'role': self.role_operator.pk}, format='json', **self._auth_header(actor)
         )
         self.assertEqual(response.status_code, 400)
 
@@ -374,7 +411,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._superadmin()
         response = self.client.patch(
             f'/api/users/{target.pk}/',
-            {'role': ROLE_OPERATOR, 'office': self.office_a.pk},
+            {'role': self.role_operator.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
@@ -382,44 +419,49 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
 
 
 class RoleScopeSyncTests(OfficesUsersApiTestCase):
-    """Step 8 (Role x Scope alignment) — `_sync_admin_scope_group` now
-    also manages the 'blast' Group (not just 'user administration'), and
-    must NEVER touch 'system administration'/'reading' — those two stay
-    Group-only for genuinely global actions (Sync Recovery, Dashboard/
-    Sessions), reached by Office/Global Admin instead through
-    HasOfficeAdminAccess/HasOfficeAccess (role-checked live, no Group)."""
+    """Dynamic Role model — `_sync_role_groups` replaces the old hardcoded
+    `ROLE_GROUPS` mapping this class used to exercise. `role` is now the
+    ONE field carrying both organizational standing AND scopes (the Role
+    merge) — creating/updating a user with a Role whose `scopes` is empty
+    grants no Groups at all, and any globally-accessing actor may assign
+    ANY existing Role (a Role's own `scopes`/flags are defined separately,
+    Superuser-only, via `/api/roles/` — see `RoleApiTests` below)."""
 
-    def test_creating_an_office_admin_grants_user_administration_and_blast_groups(self):
+    def _role(self, name, scopes=(), **flags):
+        return Role.objects.create(name=name, scopes=list(scopes), **flags)
+
+    def test_creating_a_user_with_a_scopeless_role_grants_no_groups(self):
         actor = self._superadmin()
+        bare_role = self._role('Bare Office Admin', is_office_admin=True)
         response = self.client.post(
             '/api/users/',
-            {'username': 'newadmin', 'password': 'a-strong-password', 'role': ROLE_OFFICE_ADMIN, 'office': self.office_a.pk},
+            {'username': 'newadmin', 'password': 'a-strong-password', 'role': bare_role.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
         self.assertEqual(response.status_code, 201)
         created = User.objects.get(username='newadmin')
-        group_names = set(created.groups.values_list('name', flat=True))
-        self.assertEqual(group_names, {ADMIN_SCOPE, 'blast'})
+        self.assertEqual(created.groups.count(), 0)
 
-    def test_creating_a_global_admin_grants_user_administration_and_blast_groups(self):
+    def test_creating_a_user_with_a_scoped_role_grants_exactly_its_scopes(self):
         actor = self._superadmin()
+        role = self._role('Office Admin+', is_office_admin=True, scopes=['reading', 'blast', ADMIN_SCOPE])
         response = self.client.post(
             '/api/users/',
-            {'username': 'newgadmin', 'password': 'a-strong-password', 'role': ROLE_GLOBAL_ADMIN},
+            {'username': 'newadmin2', 'password': 'a-strong-password', 'role': role.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
         self.assertEqual(response.status_code, 201)
-        created = User.objects.get(username='newgadmin')
-        group_names = set(created.groups.values_list('name', flat=True))
-        self.assertEqual(group_names, {ADMIN_SCOPE, 'blast'})
+        created = User.objects.get(username='newadmin2')
+        self.assertEqual(set(created.groups.values_list('name', flat=True)), {'reading', 'blast', ADMIN_SCOPE})
+        self.assertEqual(created.office_membership.role_id, role.pk)
 
-    def test_creating_an_operator_grants_no_groups_at_all(self):
+    def test_creating_an_operator_role_user_with_no_scopes_grants_no_groups(self):
         actor = self._superadmin()
         response = self.client.post(
             '/api/users/',
-            {'username': 'newoperator', 'password': 'a-strong-password', 'role': ROLE_OPERATOR, 'office': self.office_a.pk},
+            {'username': 'newoperator', 'password': 'a-strong-password', 'role': self.role_operator.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
@@ -427,54 +469,224 @@ class RoleScopeSyncTests(OfficesUsersApiTestCase):
         created = User.objects.get(username='newoperator')
         self.assertEqual(created.groups.count(), 0)
 
-    def test_office_admin_and_global_admin_never_get_system_administration_or_reading_groups(self):
-        actor = self._superadmin()
-        for role, office in ((ROLE_OFFICE_ADMIN, self.office_a.pk), (ROLE_GLOBAL_ADMIN, None)):
-            username = f'checkgroups_{role}'
-            payload = {'username': username, 'password': 'a-strong-password', 'role': role}
-            if office is not None:
-                payload['office'] = office
-            self.client.post('/api/users/', payload, format='json', **self._auth_header(actor))
-            created = User.objects.get(username=username)
-            group_names = set(created.groups.values_list('name', flat=True))
-            self.assertNotIn('system administration', group_names)
-            self.assertNotIn('reading', group_names)
-
-    def test_demoting_office_admin_to_operator_revokes_blast_and_user_administration(self):
-        actor = self._superadmin()
-        self.client.post(
+    def test_office_admin_actor_can_create_a_user_with_a_non_global_role(self):
+        # Unaffected by the merge: an Office Admin could always create
+        # another office_admin/operator-equivalent user in their own
+        # Office — only a Role with grants_global_access is blocked for
+        # a non-globally-accessing actor (see the next test).
+        actor = self._office_admin('officeadminactor', self.office_a)
+        role = self._role('Reader Op', is_operator=True, scopes=['reading'])
+        response = self.client.post(
             '/api/users/',
-            {'username': 'demoted_admin', 'password': 'a-strong-password', 'role': ROLE_OFFICE_ADMIN, 'office': self.office_a.pk},
+            {'username': 'notsneaky', 'password': 'a-strong-password', 'role': role.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
-        target = User.objects.get(username='demoted_admin')
-        self.assertEqual(
-            set(target.groups.values_list('name', flat=True)), {ADMIN_SCOPE, 'blast'}
+        self.assertEqual(response.status_code, 201)
+        created = User.objects.get(username='notsneaky')
+        self.assertEqual(set(created.groups.values_list('name', flat=True)), {'reading'})
+
+    def test_office_admin_actor_cannot_create_a_user_with_a_globally_accessing_role(self):
+        actor = self._office_admin('officeadminactor2', self.office_a)
+        role = self._role('Sneaky Global', grants_global_access=True, scopes=['reading'])
+        response = self.client.post(
+            '/api/users/',
+            {'username': 'sneaky', 'password': 'a-strong-password', 'role': role.pk, 'office': None},
+            format='json',
+            **self._auth_header(actor),
         )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(User.objects.filter(username='sneaky').exists())
+
+    def test_office_admin_actor_cannot_reassign_a_user_to_a_globally_accessing_role(self):
+        actor = self._office_admin('officeadminactor3', self.office_a)
+        target = self._operator('targetoperator', self.office_a)
+        role = self._role('Sneaky Global 2', grants_global_access=True)
         response = self.client.patch(
             f'/api/users/{target.pk}/',
-            {'role': ROLE_OPERATOR, 'office': self.office_a.pk},
+            {'role': role.pk, 'office': None},
+            format='json',
+            **self._auth_header(actor),
+        )
+        self.assertEqual(response.status_code, 403)
+        target.refresh_from_db()
+        self.assertEqual(target.office_membership.role_id, self.role_operator.pk)
+
+    def test_global_admin_can_reassign_a_user_to_a_different_role(self):
+        actor = self._global_admin()
+        target = self._operator('standalone_target', self.office_a)
+        role = self._role('Reader', scopes=['reading'], is_operator=True)
+        response = self.client.patch(
+            f'/api/users/{target.pk}/',
+            {'role': role.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
         self.assertEqual(response.status_code, 200)
         target.refresh_from_db()
+        self.assertEqual(target.office_membership.role_id, role.pk)
+        self.assertEqual(set(target.groups.values_list('name', flat=True)), {'reading'})
+
+    def test_reassigning_to_a_role_with_fewer_scopes_revokes_the_dropped_groups(self):
+        actor = self._global_admin()
+        rich_role = self._role('Rich', scopes=['reading', 'blast'], is_operator=True)
+        target = self._operator('demote_target', self.office_a)
+        target.office_membership.role = rich_role
+        target.office_membership.save(update_fields=['role'])
+        for name in ('reading', 'blast'):
+            group, _ = Group.objects.get_or_create(name=name)
+            target.groups.add(group)
+
+        response = self.client.patch(
+            f'/api/users/{target.pk}/',
+            {'role': self.role_operator.pk, 'office': self.office_a.pk},
+            format='json',
+            **self._auth_header(actor),
+        )
+        self.assertEqual(response.status_code, 200)
+        target.refresh_from_db()
+        self.assertEqual(target.office_membership.role_id, self.role_operator.pk)
         self.assertEqual(target.groups.count(), 0)
 
-    def test_promoting_operator_to_office_admin_grants_blast_and_user_administration(self):
+
+class RoleApiTests(OfficesUsersApiTestCase):
+    """`/api/roles/` write access (POST/PATCH/DELETE) — Superuser-only,
+    never reachable via a scope (not even 'user administration', which a
+    non-superuser Global/Office Admin can hold via their own assigned
+    Role) — see `RoleListCreateView`'s own docstring for why. GET is
+    readable by any globally-accessing actor (see the next test)."""
+
+    def test_superuser_can_list_and_create_roles(self):
         actor = self._superadmin()
-        target = self._operator('promoted_operator', self.office_a)
-        self.assertEqual(target.groups.count(), 0)
-        response = self.client.patch(
-            f'/api/users/{target.pk}/',
-            {'role': ROLE_OFFICE_ADMIN, 'office': self.office_a.pk},
+        response = self.client.post(
+            '/api/roles/', {'name': 'Support', 'scopes': ['reading', 'blast']}, format='json', **self._auth_header(actor)
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(Role.objects.filter(name='Support', scopes=['reading', 'blast']).exists())
+
+        response = self.client.get('/api/roles/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 200)
+
+    def test_superuser_can_set_organizational_flags_on_a_role(self):
+        actor = self._superadmin()
+        response = self.client.post(
+            '/api/roles/',
+            {'name': 'Custom Admin', 'scopes': ['reading'], 'grants_global_access': True, 'is_office_admin': True},
             format='json',
             **self._auth_header(actor),
         )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['grants_global_access'], True)
+        self.assertEqual(response.data['is_office_admin'], True)
+        self.assertEqual(response.data['is_operator'], False)
+        role = Role.objects.get(name='Custom Admin')
+        self.assertTrue(role.grants_global_access)
+        self.assertTrue(role.is_office_admin)
+        self.assertEqual(len(response.data), 1)
+
+    def test_global_admin_can_list_but_not_create_edit_or_delete_roles(self):
+        actor = self._global_admin()
+        role = Role.objects.create(name='Existing', scopes=['reading'])
+
+        # Read: allowed, so a Global Admin can populate the "assign a
+        # Role" picker in the Users form.
+        response = self.client.get('/api/roles/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 200)
+        response = self.client.get(f'/api/roles/{role.pk}/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 200)
+
+        # Write: blocked — defining/changing what a Role grants stays
+        # Superuser-only, even for a Global Admin who holds 'user
+        # administration' themselves.
+        response = self.client.post(
+            '/api/roles/', {'name': 'Sneaky', 'scopes': ['system administration']}, format='json', **self._auth_header(actor)
+        )
+        self.assertEqual(response.status_code, 403)
+        response = self.client.patch(
+            f'/api/roles/{role.pk}/', {'scopes': ['reading', 'blast']}, format='json', **self._auth_header(actor)
+        )
+        self.assertEqual(response.status_code, 403)
+        response = self.client.delete(f'/api/roles/{role.pk}/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 403)
+
+    def test_office_admin_can_list_roles_but_operator_cannot(self):
+        # Office Admin needs the Role catalog to populate the Users
+        # form's single `role` picker (the old fixed 3-value enum never
+        # needed an API call for this) — but still cannot write to it
+        # (covered by the Superuser-only write tests elsewhere).
+        office_admin = self._office_admin('oa', self.office_a)
+        response = self.client.get('/api/roles/', **self._auth_header(office_admin))
+        self.assertEqual(response.status_code, 200)
+
+        operator = self._operator('op', self.office_a)
+        response = self.client.get('/api/roles/', **self._auth_header(operator))
+        self.assertEqual(response.status_code, 403)
+
+    def test_office_admin_cannot_write_to_roles_api(self):
+        actor = self._office_admin('oawrite', self.office_a)
+        role = Role.objects.create(name='Existing2', scopes=['reading'])
+        response = self.client.post(
+            '/api/roles/', {'name': 'Sneaky3', 'scopes': ['reading']}, format='json', **self._auth_header(actor)
+        )
+        self.assertEqual(response.status_code, 403)
+        response = self.client.patch(
+            f'/api/roles/{role.pk}/', {'scopes': ['blast']}, format='json', **self._auth_header(actor)
+        )
+        self.assertEqual(response.status_code, 403)
+        response = self.client.delete(f'/api/roles/{role.pk}/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 403)
+
+    def test_creating_a_role_with_an_unknown_scope_is_rejected(self):
+        actor = self._superadmin()
+        response = self.client.post(
+            '/api/roles/', {'name': 'Bogus', 'scopes': ['reading', 'not-a-real-scope']}, format='json', **self._auth_header(actor)
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Role.objects.filter(name='Bogus').exists())
+
+    def test_superuser_can_create_a_role_with_any_declared_scope_including_system_administration(self):
+        # Deliberate: Role CRUD is Superuser-only, so a Role naming
+        # 'system administration' is exactly as trusted as the Superuser
+        # who defined it — no additional restriction on scope content.
+        actor = self._superadmin()
+        response = self.client.post(
+            '/api/roles/', {'name': 'Full', 'scopes': ['system administration']}, format='json', **self._auth_header(actor)
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_deleting_an_unused_role_succeeds(self):
+        actor = self._superadmin()
+        role = Role.objects.create(name='Unused', scopes=['reading'])
+        response = self.client.delete(f'/api/roles/{role.pk}/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Role.objects.filter(pk=role.pk).exists())
+
+    def test_deleting_a_role_assigned_to_a_user_is_blocked(self):
+        actor = self._superadmin()
+        role = Role.objects.create(name='In Use', scopes=['reading'])
+        target = self._operator('assignee', self.office_a)
+        target.office_membership.role = role
+        target.office_membership.save(update_fields=['role'])
+
+        response = self.client.delete(f'/api/roles/{role.pk}/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(Role.objects.filter(pk=role.pk).exists())
+
+    def test_editing_a_roles_scopes_resyncs_assigned_members_immediately(self):
+        actor = self._superadmin()
+        role = Role.objects.create(name='Evolving', scopes=['reading'])
+        target = self._operator('resync_target', self.office_a)
+        target.office_membership.role = role
+        target.office_membership.save(update_fields=['role'])
+        group, _ = Group.objects.get_or_create(name='reading')
+        target.groups.add(group)
+
+        response = self.client.patch(
+            f'/api/roles/{role.pk}/', {'scopes': ['reading', 'blast']}, format='json', **self._auth_header(actor)
+        )
         self.assertEqual(response.status_code, 200)
         target.refresh_from_db()
-        self.assertEqual(set(target.groups.values_list('name', flat=True)), {ADMIN_SCOPE, 'blast'})
+        self.assertEqual(set(target.groups.values_list('name', flat=True)), {'reading', 'blast'})
 
 
 # --- OFFICE INBOX CONFIG (Step 10) --------------------------------------

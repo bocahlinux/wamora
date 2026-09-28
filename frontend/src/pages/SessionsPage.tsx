@@ -28,7 +28,23 @@ import {
 } from '../lib/bffApi';
 import { config } from '../lib/config';
 import { useApiQuery } from '../lib/useApiQuery';
+import { useAuth } from '../lib/AuthContext';
 import './SessionsPage.css';
+
+// Session control gate — backend (bff/src/routes/session.ts's
+// requireScope('session control')) is and remains the sole authority: the
+// 'session control' JWT scope is only ever granted to a Superadmin (the
+// unconditional superuser bypass in apps.authn.jwt_utils.compute_scopes())
+// — no Django Group/role mapping (apps.offices.serializers.ROLE_GROUPS)
+// grants it to a Global Admin or Office Admin, so a non-superuser Admin's
+// start/stop/restart/logout/pairing request was already rejected
+// server-side before this page hid the controls. This only fixes the UX
+// gap: showing clickable buttons that always 403 for that caller was
+// confusing at best, and looked like a permission boundary that wasn't
+// actually being enforced anywhere visible. Same claims.scopes.includes()
+// pattern InboxPage.tsx's own canRecover/SYSTEM_ADMINISTRATION_SCOPE gate
+// already uses.
+const SESSION_CONTROL_SCOPE = 'session control';
 
 type ActionFeedback =
   | { action: SessionLifecycleAction; kind: 'success' }
@@ -86,6 +102,8 @@ type ConnectivityIssue = 'unreachable' | 'unauthorized';
 export function SessionsPage() {
   const sessionName = config.wahaSessionName;
   const statusQuery = useApiQuery(() => getSessionStatus(sessionName), [sessionName]);
+  const { claims } = useAuth();
+  const canControlSession = claims?.scopes.includes(SESSION_CONTROL_SCOPE) ?? false;
 
   const [busyAction, setBusyAction] = useState<SessionLifecycleAction | null>(null);
   const [feedback, setFeedback] = useState<ActionFeedback | null>(null);
@@ -279,36 +297,42 @@ export function SessionsPage() {
                 </p>
               ) : null}
 
-              <div className="wa-session-card__actions">
-                <Button
-                  variant="primary"
-                  disabled={busyAction !== null || isSyncing}
-                  onClick={() => runAction('start', startSession)}
-                >
-                  <Play size={16} strokeWidth={1.75} aria-hidden="true" />
-                  {busyAction === 'start' ? ACTION_VERB_ING.start : 'Start'}
-                </Button>
-                <Button
-                  variant="secondary"
-                  disabled={busyAction !== null || isSyncing}
-                  onClick={() => runAction('restart', restartSession)}
-                >
-                  <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
-                  {busyAction === 'restart' ? ACTION_VERB_ING.restart : 'Restart'}
-                </Button>
-                <Button variant="danger" disabled={busyAction !== null || isSyncing} onClick={() => setConfirmAction('stop')}>
-                  <Square size={16} strokeWidth={1.75} aria-hidden="true" />
-                  Stop
-                </Button>
-                <Button variant="danger" disabled={busyAction !== null || isSyncing} onClick={() => setConfirmAction('logout')}>
-                  <LogOut size={16} strokeWidth={1.75} aria-hidden="true" />
-                  Logout
-                </Button>
-                <Button variant="secondary" disabled={busyAction !== null} onClick={() => setPairingOpen(true)}>
-                  <QrCode size={16} strokeWidth={1.75} aria-hidden="true" />
-                  Pair device
-                </Button>
-              </div>
+              {canControlSession ? (
+                <div className="wa-session-card__actions">
+                  <Button
+                    variant="primary"
+                    disabled={busyAction !== null || isSyncing}
+                    onClick={() => runAction('start', startSession)}
+                  >
+                    <Play size={16} strokeWidth={1.75} aria-hidden="true" />
+                    {busyAction === 'start' ? ACTION_VERB_ING.start : 'Start'}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={busyAction !== null || isSyncing}
+                    onClick={() => runAction('restart', restartSession)}
+                  >
+                    <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
+                    {busyAction === 'restart' ? ACTION_VERB_ING.restart : 'Restart'}
+                  </Button>
+                  <Button variant="danger" disabled={busyAction !== null || isSyncing} onClick={() => setConfirmAction('stop')}>
+                    <Square size={16} strokeWidth={1.75} aria-hidden="true" />
+                    Stop
+                  </Button>
+                  <Button variant="danger" disabled={busyAction !== null || isSyncing} onClick={() => setConfirmAction('logout')}>
+                    <LogOut size={16} strokeWidth={1.75} aria-hidden="true" />
+                    Logout
+                  </Button>
+                  <Button variant="secondary" disabled={busyAction !== null} onClick={() => setPairingOpen(true)}>
+                    <QrCode size={16} strokeWidth={1.75} aria-hidden="true" />
+                    Pair device
+                  </Button>
+                </div>
+              ) : (
+                <p className="wa-session-feedback" role="status">
+                  Only a Superadmin can start, stop, restart, log out, or pair this session.
+                </p>
+              )}
 
               {feedback ? (
                 feedback.kind === 'error' ? (

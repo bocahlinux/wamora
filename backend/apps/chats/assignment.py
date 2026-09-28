@@ -30,7 +30,6 @@ from django.db.models import F
 from django.utils import timezone
 
 from apps.chats.models import Chat
-from apps.offices.models import ROLE_OPERATOR
 
 USER_NOT_FOUND = 'user_not_found'
 USER_INACTIVE = 'user_inactive'
@@ -41,11 +40,11 @@ NOT_AVAILABLE = 'not_available'
 
 def valid_assignment_candidates(office):
     """Users who may currently be assigned a Chat belonging to `office`:
-    a real (current) `OfficeMembership` in exactly this Office, role
-    `operator` (Step 14's own deliberate minimal scope — an Office
-    Admin/Global Admin is never itself an assignment TARGET, only an
-    actor who may perform the assignment), `is_available=True`, and the
-    Django account itself `is_active`. All three axes checked
+    a real (current) `OfficeMembership` in exactly this Office, whose
+    `Role` carries `is_operator` (Step 14's own deliberate minimal scope
+    — an Office Admin/Global Admin is never itself an assignment TARGET,
+    only an actor who may perform the assignment), `is_available=True`,
+    and the Django account itself `is_active`. All axes checked
     independently, on purpose — see `apps.offices.models.OfficeMembership
     .is_available`'s own docstring for why they are never conflated."""
     if office is None:
@@ -53,7 +52,7 @@ def valid_assignment_candidates(office):
     return User.objects.filter(
         is_active=True,
         office_membership__office=office,
-        office_membership__role=ROLE_OPERATOR,
+        office_membership__role__is_operator=True,
         office_membership__is_available=True,
     ).annotate(is_available=F('office_membership__is_available')).order_by('username')
 
@@ -76,7 +75,7 @@ def assign_chat_to_operator(chat, user_id):
     with `apps.blast.views`' approve/reject, which DOES compare-and-set
     because an invalid status transition is a real error there)."""
     try:
-        target = User.objects.select_related('office_membership').get(pk=user_id)
+        target = User.objects.select_related('office_membership', 'office_membership__role').get(pk=user_id)
     except (User.DoesNotExist, ValueError, TypeError):
         return None, USER_NOT_FOUND
 
@@ -86,7 +85,7 @@ def assign_chat_to_operator(chat, user_id):
     membership = getattr(target, 'office_membership', None)
     if membership is None or membership.office_id != chat.office_id:
         return None, NOT_OFFICE_MEMBER
-    if membership.role != ROLE_OPERATOR:
+    if not membership.role.is_operator:
         return None, NOT_OPERATOR_ROLE
     if not membership.is_available:
         return None, NOT_AVAILABLE

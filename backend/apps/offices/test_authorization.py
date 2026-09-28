@@ -8,9 +8,11 @@ from apps.offices.authorization import (
     get_user_office,
     has_global_access,
     is_global_admin,
+    is_office_admin_role,
+    is_operator_role,
     is_superadmin,
 )
-from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership
+from apps.offices.models import Office, OfficeMembership, Role
 
 
 class OfficeAuthorizationTests(TestCase):
@@ -33,10 +35,11 @@ class OfficeAuthorizationTests(TestCase):
         self.assertTrue(has_global_access(superadmin))
         self.assertIsNone(get_user_office(superadmin))  # no Office, and that's fine for a superadmin
 
-    # B. GLOBAL_ADMIN
-    def test_global_admin_has_global_access_to_any_office(self):
+    # B. Role with grants_global_access
+    def test_global_access_role_has_global_access_to_any_office(self):
         user = User.objects.create_user('gadmin', password='pw')
-        OfficeMembership.objects.create(user=user, office=None, role=ROLE_GLOBAL_ADMIN)
+        role = Role.objects.create(name='Global Admin', grants_global_access=True)
+        OfficeMembership.objects.create(user=user, office=None, role=role, requires_office=False)
 
         self.assertFalse(is_superadmin(user))
         self.assertTrue(is_global_admin(user))
@@ -45,22 +48,28 @@ class OfficeAuthorizationTests(TestCase):
         self.assertTrue(can_access_office(user, self.office_b))
         self.assertIsNone(get_user_office(user))  # office membership stays NULL
 
-    # C. OFFICE_ADMIN
-    def test_office_admin_can_only_access_own_office(self):
+    # C. Role with is_office_admin
+    def test_office_admin_role_can_only_access_own_office(self):
         user = User.objects.create_user('oadmin', password='pw')
-        OfficeMembership.objects.create(user=user, office=self.office_a, role=ROLE_OFFICE_ADMIN)
+        role = Role.objects.create(name='Office Admin', is_office_admin=True)
+        OfficeMembership.objects.create(user=user, office=self.office_a, role=role, requires_office=True)
 
         self.assertFalse(has_global_access(user))
+        self.assertTrue(is_office_admin_role(user))
+        self.assertFalse(is_operator_role(user))
         self.assertEqual(get_user_office(user), self.office_a)
         self.assertTrue(can_access_office(user, self.office_a))
         self.assertFalse(can_access_office(user, self.office_b))
 
-    # D. OPERATOR
-    def test_operator_can_only_access_own_office(self):
+    # D. Role with is_operator
+    def test_operator_role_can_only_access_own_office(self):
         user = User.objects.create_user('operator', password='pw')
-        OfficeMembership.objects.create(user=user, office=self.office_a, role=ROLE_OPERATOR)
+        role = Role.objects.create(name='Operator', is_operator=True)
+        OfficeMembership.objects.create(user=user, office=self.office_a, role=role, requires_office=True)
 
         self.assertFalse(has_global_access(user))
+        self.assertTrue(is_operator_role(user))
+        self.assertFalse(is_office_admin_role(user))
         self.assertEqual(get_user_office(user), self.office_a)
         self.assertTrue(can_access_office(user, self.office_a))
         self.assertFalse(can_access_office(user, self.office_b))

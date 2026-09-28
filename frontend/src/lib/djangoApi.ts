@@ -28,12 +28,32 @@ export function getRedisHealth() {
   return request<ComponentHealth>(`${config.djangoBaseUrl}/api/health/redis/`);
 }
 
+/** The Role merge — `Role` used to be a separate, purely scope/menu-
+ * access concept (`custom_role`) alongside a fixed
+ * `'global_admin'/'office_admin'/'operator'` string enum
+ * (`OfficeMembership.role`). Both are now the same object: `scopes`
+ * decides feature/menu access (JWT scopes), and
+ * `grants_global_access`/`is_office_admin`/`is_operator` decide
+ * organizational standing (global vs Office-scoped, administrative
+ * authority, operator/assignment eligibility) — independent booleans,
+ * not a re-creation of the old enum, since a Superadmin-defined Role can
+ * combine or omit them freely. */
+export interface RoleSummary {
+  id: number;
+  name: string;
+  scopes: string[];
+  grants_global_access: boolean;
+  is_office_admin: boolean;
+  is_operator: boolean;
+}
+
 /** Step 4/6 (Office <-> Blast/Settings integration) — `office` is `null`
- * for a user with no Office membership (or a Global Admin, who
- * deliberately has none). `has_global_access` is true for Superadmin or
- * Global Admin — both see/act across every Office. `role` is `null` for
- * a Superadmin/Operator/no-membership user — used only to decide whether
- * to show the Settings admin UI for an Office Admin too (SettingsPage.tsx). */
+ * for a user with no Office membership (or a globally-accessing Role,
+ * which deliberately has none). `has_global_access` is true for
+ * Superadmin or a Role with `grants_global_access` — both see/act across
+ * every Office. `role` is `null` for a Superadmin or anyone without a
+ * membership row — used only to decide whether to show the Settings
+ * admin UI for an Office-Admin-equivalent Role too (SettingsPage.tsx). */
 export interface Me {
   id: number;
   username: string;
@@ -41,9 +61,9 @@ export interface Me {
   is_superuser: boolean;
   has_global_access: boolean;
   office: { id: number; name: string } | null;
-  role: 'global_admin' | 'office_admin' | 'operator' | null;
+  role: RoleSummary | null;
   /** Step 14 — `null` for anyone without a membership row; only
-   * meaningful alongside `role === 'operator'`. */
+   * meaningful alongside `role.is_operator`. */
   is_available: boolean | null;
 }
 
@@ -562,8 +582,6 @@ export function updateOfficeInboxConfig(officeId: number, patch: UpdateOfficeInb
   });
 }
 
-export type OfficeRole = 'global_admin' | 'office_admin' | 'operator';
-
 export interface AdminUser {
   id: number;
   username: string;
@@ -571,9 +589,12 @@ export interface AdminUser {
   last_name: string;
   is_active: boolean;
   is_superuser: boolean;
-  /** `null` for a Superadmin (no OfficeMembership row at all). */
-  role: OfficeRole | null;
-  /** `null` for a Global Admin (by design — not tied to one Office) or a Superadmin. */
+  /** `null` for a Superadmin (no OfficeMembership row at all). Carries
+   * BOTH organizational standing and feature/scope access (the Role
+   * merge) — see `RoleSummary`'s own comment. */
+  role: RoleSummary | null;
+  /** `null` for a globally-accessing Role (by design — not tied to one
+   * Office) or a Superadmin. */
   office: { id: number; name: string } | null;
   date_joined: string;
 }
@@ -594,8 +615,11 @@ export interface CreateUserInput {
   password: string;
   first_name?: string;
   last_name?: string;
-  role: OfficeRole;
-  /** Required for office_admin/operator; omit (or send null) for global_admin. */
+  /** A Role id. Required for a non-globally-accessing Role; omit (or
+   * send null) `office` for a Role with `grants_global_access`. Only a
+   * globally-accessing actor may pick a Role that itself has
+   * `grants_global_access` — the server 403s an Office Admin who tries. */
+  role: number;
   office?: number | null;
 }
 
@@ -617,20 +641,74 @@ export interface UpdateUserInput {
   last_name?: string;
   password?: string;
   is_active?: boolean;
-  /** `role` and `office` must be sent together (UserDetailView.patch) —
-   * omit both to leave Office role/membership untouched. */
-  role?: OfficeRole;
+  /** `role` (a Role id) and `office` must be sent together
+   * (UserDetailView.patch) — omit both to leave Office role/membership
+   * untouched. Only a globally-accessing actor may pick a Role with
+   * `grants_global_access` — the server 403s an Office Admin who tries. */
+  role?: number;
   office?: number | null;
 }
 
 /** PATCH /api/users/:id/ — profile fields and/or role+office. The
  * server rejects a caller targeting their own account here (403) unless
  * they are a Superadmin, and rejects an Office Admin acting outside
- * their own Office or attempting to assign global_admin (403). */
+ * their own Office or attempting to assign a globally-accessing Role
+ * (403). */
 export function updateUser(id: number, patch: UpdateUserInput) {
   return request<AdminUser>(`${config.djangoBaseUrl}/api/users/${id}/`, {
     method: 'PATCH',
     body: patch,
+    headers: authHeader(),
+  });
+}
+
+// --- Dynamic Roles ("Role x Scope" feature) -------------------------------
+// `/api/roles/` (RoleListCreateView/RoleDetailView) — Superuser-only
+// server-side (`IsSuperuser`, not any JWT scope): a Role's `scopes` list
+// decides what the users it's assigned to may do (`_sync_role_groups`
+// keeps their Django Groups, and so their JWT `scopes` claim, in sync).
+// `scopes` is always a subset of the same 6 fixed strings
+// `settings.JWT_SCOPES` declares backend-side — never freeform.
+
+export interface Role extends RoleSummary {
+  created_at: string;
+  updated_at: string;
+}
+
+export function getRoles() {
+  return request<Role[]>(`${config.djangoBaseUrl}/api/roles/`, { headers: authHeader() });
+}
+
+export interface RoleInput {
+  name: string;
+  scopes: string[];
+  grants_global_access?: boolean;
+  is_office_admin?: boolean;
+  is_operator?: boolean;
+}
+
+export function createRole(input: RoleInput) {
+  return request<Role>(`${config.djangoBaseUrl}/api/roles/`, {
+    method: 'POST',
+    body: input,
+    headers: authHeader(),
+  });
+}
+
+export function updateRole(id: number, patch: Partial<RoleInput>) {
+  return request<Role>(`${config.djangoBaseUrl}/api/roles/${id}/`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
+}
+
+/** DELETE /api/roles/:id/ — the server returns a 400 `validation` error
+ * (not a raw 500) if any user is still assigned this Role; reassign or
+ * clear it from them first. */
+export function deleteRole(id: number) {
+  return request<{ deleted: true }>(`${config.djangoBaseUrl}/api/roles/${id}/`, {
+    method: 'DELETE',
     headers: authHeader(),
   });
 }

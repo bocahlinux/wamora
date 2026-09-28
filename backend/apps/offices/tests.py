@@ -2,14 +2,11 @@ from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 
-from apps.offices.models import (
-    ROLE_GLOBAL_ADMIN,
-    ROLE_OFFICE_ADMIN,
-    ROLE_OPERATOR,
-    Office,
-    OfficeInboxConfig,
-    OfficeMembership,
-)
+from apps.offices.models import Office, OfficeInboxConfig, OfficeMembership, Role
+
+
+def _role(name, **flags):
+    return Role.objects.create(name=name, **flags)
 
 
 class OfficeTests(TestCase):
@@ -38,23 +35,30 @@ class OfficeMembershipTests(TestCase):
 
     def test_membership_links_user_to_office(self):
         user = User.objects.create_user('operator1', password='pw')
-        membership = OfficeMembership.objects.create(user=user, office=self.office_a, role=ROLE_OPERATOR)
+        membership = OfficeMembership.objects.create(
+            user=user, office=self.office_a, role=_role('Operator', is_operator=True), requires_office=True
+        )
         self.assertEqual(membership.office, self.office_a)
         self.assertEqual(user.office_membership.office, self.office_a)
 
     def test_one_office_can_have_multiple_users(self):
         admin = User.objects.create_user('admin1', password='pw')
         operator = User.objects.create_user('operator2', password='pw')
-        OfficeMembership.objects.create(user=admin, office=self.office_a, role=ROLE_OFFICE_ADMIN)
-        OfficeMembership.objects.create(user=operator, office=self.office_a, role=ROLE_OPERATOR)
+        OfficeMembership.objects.create(
+            user=admin, office=self.office_a, role=_role('Office Admin', is_office_admin=True), requires_office=True
+        )
+        OfficeMembership.objects.create(
+            user=operator, office=self.office_a, role=_role('Operator2', is_operator=True), requires_office=True
+        )
         self.assertEqual(self.office_a.memberships.count(), 2)
 
     def test_user_cannot_have_two_offices(self):
         user = User.objects.create_user('operator3', password='pw')
-        OfficeMembership.objects.create(user=user, office=self.office_a, role=ROLE_OPERATOR)
+        role = _role('Operator3', is_operator=True)
+        OfficeMembership.objects.create(user=user, office=self.office_a, role=role, requires_office=True)
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
-                OfficeMembership.objects.create(user=user, office=self.office_b, role=ROLE_OPERATOR)
+                OfficeMembership.objects.create(user=user, office=self.office_b, role=role, requires_office=True)
 
     def test_superadmin_can_have_no_office_membership(self):
         superadmin = User.objects.create_superuser('root', password='pw')
@@ -72,45 +76,64 @@ class OfficeMembershipTests(TestCase):
 
 
 class OfficeMembershipRoleTests(TestCase):
-    """Step 2 — role/permission architecture."""
+    """Step 2 — role/permission architecture, extended by the Role merge:
+    `role` is now a `Role` FK carrying `grants_global_access`/
+    `is_office_admin`/`is_operator`, and `requires_office` is the
+    denormalized copy of `not role.grants_global_access` the
+    `office_matches_role` CheckConstraint actually checks (see that
+    field's own comment in models.py for why — a CHECK can't join to the
+    separate Role table)."""
 
     def setUp(self):
         self.office_a = Office.objects.create(name='Samsat Palangka Raya')
 
-    def test_office_admin_has_office_admin_role(self):
+    def test_office_admin_role_has_is_office_admin_flag(self):
         user = User.objects.create_user('padmin', password='pw')
-        membership = OfficeMembership.objects.create(user=user, office=self.office_a, role=ROLE_OFFICE_ADMIN)
+        membership = OfficeMembership.objects.create(
+            user=user, office=self.office_a, role=_role('Office Admin', is_office_admin=True), requires_office=True
+        )
         membership.refresh_from_db()
-        self.assertEqual(membership.role, ROLE_OFFICE_ADMIN)
+        self.assertTrue(membership.role.is_office_admin)
 
-    def test_operator_has_operator_role(self):
+    def test_operator_role_has_is_operator_flag(self):
         user = User.objects.create_user('poperator', password='pw')
-        membership = OfficeMembership.objects.create(user=user, office=self.office_a, role=ROLE_OPERATOR)
+        membership = OfficeMembership.objects.create(
+            user=user, office=self.office_a, role=_role('Operator', is_operator=True), requires_office=True
+        )
         membership.refresh_from_db()
-        self.assertEqual(membership.role, ROLE_OPERATOR)
+        self.assertTrue(membership.role.is_operator)
 
-    def test_global_admin_can_be_represented_without_an_office(self):
+    def test_global_access_role_can_be_represented_without_an_office(self):
         user = User.objects.create_user('globaladmin', password='pw')
-        membership = OfficeMembership.objects.create(user=user, office=None, role=ROLE_GLOBAL_ADMIN)
+        membership = OfficeMembership.objects.create(
+            user=user, office=None, role=_role('Global Admin', grants_global_access=True), requires_office=False
+        )
         membership.refresh_from_db()
         self.assertIsNone(membership.office)
-        self.assertEqual(membership.role, ROLE_GLOBAL_ADMIN)
+        self.assertTrue(membership.role.grants_global_access)
 
-    def test_global_admin_role_rejects_an_office(self):
-        # The office_matches_role CheckConstraint: GLOBAL_ADMIN must have
-        # no Office — a Global Admin is not tied to one, by design.
+    def test_global_access_role_rejects_an_office(self):
+        # The office_matches_role CheckConstraint: a globally-accessing
+        # Role must have no Office (requires_office=False) — such a user
+        # is not tied to one, by design.
         user = User.objects.create_user('badglobaladmin', password='pw')
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
-                OfficeMembership.objects.create(user=user, office=self.office_a, role=ROLE_GLOBAL_ADMIN)
+                OfficeMembership.objects.create(
+                    user=user, office=self.office_a, role=_role('Bad Global Admin', grants_global_access=True),
+                    requires_office=False,
+                )
 
-    def test_office_admin_role_requires_an_office(self):
-        # The same constraint, the other direction: OFFICE_ADMIN/OPERATOR
-        # are only meaningful within a specific Office.
+    def test_non_global_role_requires_an_office(self):
+        # The same constraint, the other direction: a non-globally-
+        # accessing Role is only meaningful within a specific Office.
         user = User.objects.create_user('badofficeadmin', password='pw')
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
-                OfficeMembership.objects.create(user=user, office=None, role=ROLE_OFFICE_ADMIN)
+                OfficeMembership.objects.create(
+                    user=user, office=None, role=_role('Bad Office Admin', is_office_admin=True),
+                    requires_office=True,
+                )
 
     def test_superadmin_remains_representable_without_any_membership_row(self):
         # Unchanged from Step 1 — is_superuser alone is still sufficient;

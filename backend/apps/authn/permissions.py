@@ -10,8 +10,7 @@ already puts in every issued token.
 
 from rest_framework.permissions import BasePermission
 
-from apps.offices.authorization import get_user_office, has_global_access
-from apps.offices.models import ROLE_OFFICE_ADMIN
+from apps.offices.authorization import get_user_office, has_global_access, is_office_admin_role
 
 
 class HasReadingScope(BasePermission):
@@ -62,11 +61,12 @@ class HasUserAdministrationScope(BasePermission):
     A superuser gets this scope automatically (compute_scopes()'s
     superuser bypass). A non-superuser Global Admin/Office Admin gets it
     only via the 'user administration' Django Group — which this app's
-    own views assign/remove as a side effect of setting/clearing an
-    admin OfficeMembership role (see serializers.py's
-    `_sync_admin_scope_group`), so creating a Global/Office Admin through
-    this app's own API is immediately sufficient on their next login —
-    no separate manual Group-assignment command is needed."""
+    own views assign/remove as a side effect of assigning/clearing a
+    user's `role` (see serializers.py's `_sync_role_groups`, and
+    `models.Role` for the Superadmin-editable bundle that field points
+    at), so assigning a Role through this app's own API is immediately
+    sufficient on the affected user's next login — no separate manual
+    Group-assignment command is needed."""
 
     def has_permission(self, request, view):
         claims = request.auth
@@ -101,10 +101,11 @@ class HasOfficeAccess(BasePermission):
 
 class HasOfficeAdminAccess(BasePermission):
     """Step 8 (Role x Scope alignment) — TRUE for Superadmin/Global Admin
-    (`has_global_access`) or an Office Admin (`OfficeMembership.role ==
-    office_admin`) — an ADMINISTRATIVE Office role, excluding a plain
-    Operator. Deliberately independent of the `system administration`
-    JWT scope/Group.
+    (`has_global_access`) or a membership whose `Role` carries
+    `is_office_admin` (`apps.offices.authorization.is_office_admin_role`)
+    — an ADMINISTRATIVE Office role, excluding a plain Operator.
+    Deliberately independent of the `system administration` JWT
+    scope/Group.
 
     Exists because `system administration` also gates Sync Recovery
     (`apps.sync.views.SyncCheckpointRecoveryView`/`SyncCheckpointTaskStateView`),
@@ -122,5 +123,4 @@ class HasOfficeAdminAccess(BasePermission):
             return False
         if has_global_access(user):
             return True
-        membership = getattr(user, 'office_membership', None)
-        return membership is not None and membership.role == ROLE_OFFICE_ADMIN
+        return is_office_admin_role(user)

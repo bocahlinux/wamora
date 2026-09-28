@@ -17,10 +17,26 @@ from apps.chats.assignment import (
 )
 from apps.chats.authorization import chats_visible_to
 from apps.chats.models import Chat
-from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership
+from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership, Role
 from apps.waha_sessions.models import WahaSession
 
 PRIVATE_PEM, PUBLIC_PEM = generate_test_key_pair()
+
+# The Role merge — resolves the old CharField's three fixed string
+# values to the migration-0009-seeded Role rows with the matching
+# organizational flags, so `_user()` below keeps accepting the same
+# ROLE_GLOBAL_ADMIN/ROLE_OFFICE_ADMIN/ROLE_OPERATOR constants every
+# existing test call site already passes it.
+def _seeded_role(name):
+    role, _ = Role.objects.get_or_create(
+        name=name,
+        defaults={
+            'grants_global_access': name == ROLE_GLOBAL_ADMIN,
+            'is_office_admin': name == ROLE_OFFICE_ADMIN,
+            'is_operator': name == ROLE_OPERATOR,
+        },
+    )
+    return role
 
 
 class AssignmentTestBase:
@@ -40,7 +56,11 @@ class AssignmentTestBase:
                 user.is_active = False
                 user.save(update_fields=['is_active'])
         if role is not None:
-            OfficeMembership.objects.create(user=user, office=office, role=role, is_available=is_available)
+            role_obj = _seeded_role(role)
+            OfficeMembership.objects.create(
+                user=user, office=office, role=role_obj, is_available=is_available,
+                requires_office=not role_obj.grants_global_access,
+            )
         return user
 
 

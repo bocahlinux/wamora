@@ -94,7 +94,7 @@ export function BlastDetailPage() {
     meQuery.status === 'success' &&
     ((claims?.scopes.includes(SYSTEM_ADMINISTRATION_SCOPE) ?? false) ||
       meQuery.data.has_global_access ||
-      meQuery.data.role === 'office_admin');
+      (meQuery.data.role?.is_office_admin ?? false));
   const canApprove = hasApprovalAuthority && (!isCreator || isSuperuser);
   // Reject has NO creator restriction server-side (backend/apps/blast/views.py
   // BlastCampaignRejectView — unlike ApproveView, it never checks

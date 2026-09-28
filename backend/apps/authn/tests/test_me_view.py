@@ -3,7 +3,7 @@ from django.test import override_settings
 from rest_framework.test import APITestCase
 
 from apps.authn.jwt_utils import issue_access_token
-from apps.offices.models import ROLE_OFFICE_ADMIN, Office, OfficeMembership
+from apps.offices.models import ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership, Role
 
 from .keys import generate_test_key_pair
 
@@ -64,19 +64,27 @@ class MeViewTests(APITestCase):
 
     def test_returns_office_admin_role(self):
         office = Office.objects.create(name='Office A')
-        OfficeMembership.objects.create(user=self.user, office=office, role=ROLE_OFFICE_ADMIN)
+        role = Role.objects.create(name=ROLE_OFFICE_ADMIN, is_office_admin=True, scopes=['reading'])
+        OfficeMembership.objects.create(user=self.user, office=office, role=role, requires_office=True)
         response = self.client.get(ME_URL, **self._auth_header())
-        self.assertEqual(response.data['role'], ROLE_OFFICE_ADMIN)
+        self.assertEqual(
+            response.data['role'],
+            {
+                'id': role.pk, 'name': ROLE_OFFICE_ADMIN, 'scopes': ['reading'],
+                'grants_global_access': False, 'is_office_admin': True, 'is_operator': False,
+            },
+        )
 
     def test_returns_null_is_available_for_a_user_with_no_office_membership(self):
         response = self.client.get(ME_URL, **self._auth_header())
         self.assertIsNone(response.data['is_available'])
 
     def test_returns_operator_availability(self):
-        from apps.offices.models import ROLE_OPERATOR
-
         office = Office.objects.create(name='Office B')
-        OfficeMembership.objects.create(user=self.user, office=office, role=ROLE_OPERATOR, is_available=True)
+        role = Role.objects.create(name=ROLE_OPERATOR, is_operator=True)
+        OfficeMembership.objects.create(
+            user=self.user, office=office, role=role, is_available=True, requires_office=True
+        )
         response = self.client.get(ME_URL, **self._auth_header())
         self.assertTrue(response.data['is_available'])
 
