@@ -103,3 +103,11 @@ rollback/versioning, rate-limit resilience under a Redis/Postgres outage)
 is well underway with several items still open before a real go-live.
 See `docs/16-MASTER-ROADMAP.md` Section 2 for the full per-phase table
 with evidence, and Section 7 for the current actionable next steps.
+
+A Conversation/Bot Engine foundation (fully admin-configurable menus,
+triggers, and per-Office/global config — no hardcoded bot content) is also
+now built, superseding the old Phase 12/13 plain-text auto-reply handlers.
+It has no canonical phase number yet (see `docs/16-MASTER-ROADMAP.md`
+Section 5) and is live-verified against the real dev WAHA/BFF stack for
+outbound delivery; a genuine device-originated inbound test is still
+outstanding.

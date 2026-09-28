@@ -159,7 +159,7 @@ report:
 
 | Feature | Canonical placement | Status |
 |---|---|---|
-| Session-based auto-reply menu bot (esamsat lookup, typing-delay simulation, per-session JSON log) | No canonical phase covers this | **DEFERRED / OUTSIDE CURRENT CANONICAL ROADMAP** — `docs/11-DECISIONS-AND-OPEN-QUESTIONS.md` itself marks it "not yet phased." |
+| Session-based auto-reply menu bot (esamsat lookup, typing-delay simulation, per-session JSON log) | No canonical phase covers this | **FOUNDATION BUILT (2026-09-28 session), STILL OUTSIDE CURRENT CANONICAL ROADMAP** — a Conversation/Bot Engine now exists: `apps.bot` (`BotConfig`/`BotMenu`/`BotMenuItem`/`BotTrigger` — fully Superadmin/Office-Admin-configurable via `/api/bot/...` and the Settings → "Bot Configuration" UI, no hardcoded menu/trigger content), `apps.chats.conversation_engine` (the resolver: global-trigger reset, session state machine `NEW→ACTIVE→COMPLETED`/`WAITING_OPERATOR`, fallback behavior, dynamic Office-selector reusing the existing Phase 11/12 `operator_chat` functions verbatim), wired into `ingest_webhook()` in place of the old Phase 12/13 handlers (which remain in the codebase, unwired, not deleted). Verified: mocked unit tests, a rolled-back real-DB walkthrough, and — critically — a real, unmocked BFF→WAHA→WhatsApp delivery test against the live dev WAHA session (`no_epahari`), all destined only to the bot's own self-chat (`ack:2` confirmed for every scenario). **Not yet verified**: a genuine device-originated inbound message (no second controllable WhatsApp number was available for that half of the loop — see `docs/generated/` for the live-verification report once filed). Still explicitly NOT built, per the original deferred description: esamsat API lookup, typing-delay simulation, and a per-session JSON interaction log (this implementation uses relational `ConversationSession`/`Message` rows instead of a JSON blob — a deliberate design choice, not an oversight). `HANDOFF_TO_OPERATOR` exists only as an extension point (state transition + ack message), with no queue/assignment logic — that remains Phase 15's (Operator Workflow) job. No canonical phase number has been assigned to this feature by the project owner yet. |
 | Blast template + esamsat integration | Arguably within Phase 18 (Blast)'s existing scope, but not confirmed | **NEEDS REVIEW** — see Phase 18's row in Section 2. Not silently placed inside Phase 18 as "remaining work" nor silently excluded; flagged for a project-owner decision. |
 | User manager / operator-admin handoff | Its role/permission question is now largely answered by Phase 14 (Dynamic RBAC); the handoff/takeover mechanism itself is not covered by any canonical phase | **PARTIALLY ADDRESSED (permissions) / DEFERRED (mechanism) — the mechanism half is OUTSIDE CURRENT CANONICAL ROADMAP** unless the project owner places it under Phase 15 (Operator Workflow), which is the closest existing fit. |
 | Reports page | Canonical **Phase 19 (Reports/Analytics)** | Not deferred outside the roadmap — it has a real canonical home, just **NOT STARTED** (Section 2). |
@@ -215,15 +215,23 @@ Phases NOT STARTED:
 
 Next actionable work (no new phase invented; ordered by what unblocks the
 most other work, not by phase number):
-1. Decide whether to commit Phase 14 (Dynamic RBAC) as-is — it is
-   functionally complete and independently verified; nothing else in this
-   roadmap depends on Phase 22 finishing first, and Phase 15's future
-   handoff feature depends on Phase 14 being committed.
+1. Phase 14 (Dynamic RBAC) is now committed (`f83824b`, prior session) —
+   this item is closed; Section 2's Phase 14 row still says "UNCOMMITTED"
+   and needs its own status refresh (README.md's own summary was already
+   corrected for this in commit `b8979ad`; this document's per-phase table
+   was not — noted here rather than silently fixed, since re-verifying
+   the full Phase 14 evidence chain is outside this session's scope).
 2. Close Phase 22's remaining M-items (M1–M4, M7–M10) before attempting a
    real production deployment.
 3. Scope decision on Phase 18's template/esamsat extension, and on
    Phase 16/17/19's designs, whenever the project owner wants to open
    them — none is blocking anything else.
+4. The new Conversation/Bot Engine (Section 5) needs a project-owner
+   decision on whether it gets its own canonical phase number or folds
+   into Phase 15 (Operator Workflow) once `HANDOFF_TO_OPERATOR` grows real
+   assignment logic. It also still needs one real, device-originated
+   WhatsApp inbound test to close the one gap its live-verification left
+   open (see Section 5's entry).
 ```
 
 ---

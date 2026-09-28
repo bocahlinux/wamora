@@ -112,6 +112,7 @@ INSTALLED_APPS = [
     'apps.waha_sessions',
     'apps.offices',
     'apps.audit',
+    'apps.bot',
     'apps.chats',
     'apps.webhooks',
     'apps.sync',

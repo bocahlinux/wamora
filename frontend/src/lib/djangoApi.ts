@@ -712,3 +712,201 @@ export function deleteRole(id: number) {
     headers: authHeader(),
   });
 }
+
+// --- Conversation/Bot Engine ------------------------------------------
+// `/api/bot/` — `office` omitted (or `undefined`) everywhere below means
+// the GLOBAL (shared, office=null) resource; a numeric `office` means
+// that specific Office's own resource. Same `_admin_scope`-style
+// authorization every other admin endpoint uses: Superadmin/Global Admin
+// reach any scope, an Office Admin only their own Office's.
+
+export interface BotConfig {
+  id: number;
+  office: number | null;
+  enabled: boolean;
+  fallback_message: string;
+  session_completed_message: string;
+  root_menu: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/bot/config/?office=:id — omit `office` for the GLOBAL
+ * config. Lazily created server-side on first read, same pattern as
+ * `getOfficeInboxConfig`. */
+export function getBotConfig(officeId?: number) {
+  const qs = officeId != null ? `?office=${officeId}` : '';
+  return request<BotConfig>(`${config.djangoBaseUrl}/api/bot/config/${qs}`, { headers: authHeader() });
+}
+
+export type UpdateBotConfigInput = Partial<
+  Pick<BotConfig, 'enabled' | 'fallback_message' | 'session_completed_message' | 'root_menu'>
+>;
+
+export function updateBotConfig(officeId: number | undefined, patch: UpdateBotConfigInput) {
+  const qs = officeId != null ? `?office=${officeId}` : '';
+  return request<BotConfig>(`${config.djangoBaseUrl}/api/bot/config/${qs}`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
+}
+
+export const BOT_ACTION_SEND_TEXT = 'send_text';
+export const BOT_ACTION_SHOW_MENU = 'show_menu';
+export const BOT_ACTION_COMPLETE_SESSION = 'complete_session';
+export const BOT_ACTION_HANDOFF_TO_OPERATOR = 'handoff_to_operator';
+
+export type BotMenuItemActionType =
+  | typeof BOT_ACTION_SEND_TEXT
+  | typeof BOT_ACTION_SHOW_MENU
+  | typeof BOT_ACTION_COMPLETE_SESSION
+  | typeof BOT_ACTION_HANDOFF_TO_OPERATOR;
+
+export interface BotMenuItem {
+  id: number;
+  menu: number;
+  label: string;
+  trigger_value: string;
+  order: number;
+  enabled: boolean;
+  action_type: BotMenuItemActionType;
+  /** SEND_TEXT only. */
+  text: string;
+  /** SHOW_MENU only — required by the server when action_type is show_menu. */
+  target_menu: number | null;
+}
+
+export interface BotMenu {
+  id: number;
+  office: number | null;
+  name: string;
+  parent_menu: number | null;
+  intro_text: string;
+  /** When true, this menu's options are NOT stored `items` — they are
+   * built dynamically from the same Office list "Hubungi Petugas" has
+   * always used (`available_operator_chat_offices()`), reused verbatim
+   * server-side. `items` is expected to stay empty for such a menu. */
+  is_office_selector: boolean;
+  enabled: boolean;
+  items: BotMenuItem[];
+}
+
+export function getBotMenus(officeId?: number) {
+  const qs = officeId != null ? `?office=${officeId}` : '';
+  return request<BotMenu[]>(`${config.djangoBaseUrl}/api/bot/menus/${qs}`, { headers: authHeader() });
+}
+
+export interface BotMenuInput {
+  name: string;
+  office?: number | null;
+  parent_menu?: number | null;
+  intro_text?: string;
+  is_office_selector?: boolean;
+  enabled?: boolean;
+}
+
+export function createBotMenu(input: BotMenuInput) {
+  return request<BotMenu>(`${config.djangoBaseUrl}/api/bot/menus/`, {
+    method: 'POST',
+    body: input,
+    headers: authHeader(),
+  });
+}
+
+export function updateBotMenu(id: number, patch: Partial<BotMenuInput>) {
+  return request<BotMenu>(`${config.djangoBaseUrl}/api/bot/menus/${id}/`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
+}
+
+/** DELETE /api/bot/menus/:id/ — the server returns a 400 `invalid` error
+ * (not a raw 500) if this menu is still referenced by a menu item,
+ * trigger, bot config, or an in-progress conversation session. */
+export function deleteBotMenu(id: number) {
+  return request<{ deleted: true }>(`${config.djangoBaseUrl}/api/bot/menus/${id}/`, {
+    method: 'DELETE',
+    headers: authHeader(),
+  });
+}
+
+export interface BotMenuItemInput {
+  label: string;
+  trigger_value: string;
+  order?: number;
+  enabled?: boolean;
+  action_type: BotMenuItemActionType;
+  text?: string;
+  target_menu?: number | null;
+}
+
+export function createBotMenuItem(menuId: number, input: BotMenuItemInput) {
+  return request<BotMenuItem>(`${config.djangoBaseUrl}/api/bot/menus/${menuId}/items/`, {
+    method: 'POST',
+    body: input,
+    headers: authHeader(),
+  });
+}
+
+/** PATCH /api/bot/items/:id/ — cannot move an item to a different menu
+ * (the server silently drops a `menu` field in the payload); create a
+ * new item under the target menu and delete this one instead. */
+export function updateBotMenuItem(id: number, patch: Partial<BotMenuItemInput>) {
+  return request<BotMenuItem>(`${config.djangoBaseUrl}/api/bot/items/${id}/`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
+}
+
+export function deleteBotMenuItem(id: number) {
+  return request<{ deleted: true }>(`${config.djangoBaseUrl}/api/bot/items/${id}/`, {
+    method: 'DELETE',
+    headers: authHeader(),
+  });
+}
+
+export interface BotTrigger {
+  id: number;
+  office: number | null;
+  keyword: string;
+  target_menu: number | null;
+  enabled: boolean;
+}
+
+export function getBotTriggers(officeId?: number) {
+  const qs = officeId != null ? `?office=${officeId}` : '';
+  return request<BotTrigger[]>(`${config.djangoBaseUrl}/api/bot/triggers/${qs}`, { headers: authHeader() });
+}
+
+export interface BotTriggerInput {
+  keyword: string;
+  office?: number | null;
+  target_menu: number | null;
+  enabled?: boolean;
+}
+
+export function createBotTrigger(input: BotTriggerInput) {
+  return request<BotTrigger>(`${config.djangoBaseUrl}/api/bot/triggers/`, {
+    method: 'POST',
+    body: input,
+    headers: authHeader(),
+  });
+}
+
+export function updateBotTrigger(id: number, patch: Partial<BotTriggerInput>) {
+  return request<BotTrigger>(`${config.djangoBaseUrl}/api/bot/triggers/${id}/`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
+}
+
+export function deleteBotTrigger(id: number) {
+  return request<{ deleted: true }>(`${config.djangoBaseUrl}/api/bot/triggers/${id}/`, {
+    method: 'DELETE',
+    headers: authHeader(),
+  });
+}

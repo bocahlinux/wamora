@@ -7,13 +7,14 @@ import { PageHeader } from '../components/ui/PageHeader';
 import { getMe, getOffices, getRoles, getUsers, type Me } from '../lib/djangoApi';
 import { useApiQuery } from '../lib/useApiQuery';
 import { PlaceholderPage } from './PlaceholderPage';
+import { SettingsBotConfigPanel } from './SettingsBotConfigPanel';
 import { SettingsInboxConfigPanel } from './SettingsInboxConfigPanel';
 import { SettingsOfficesPanel } from './SettingsOfficesPanel';
 import { SettingsRolesPanel } from './SettingsRolesPanel';
 import { SettingsUsersPanel } from './SettingsUsersPanel';
 import './SettingsPage.css';
 
-type Tab = 'offices' | 'users' | 'inbox-config' | 'roles';
+type Tab = 'offices' | 'users' | 'inbox-config' | 'roles' | 'bot-config';
 
 // Step 6 (Office & User management) — the only functional Settings
 // content so far; anything else stays the same "not yet available"
@@ -105,6 +106,15 @@ function AdministrationSettings({ hasGlobalAccess, me }: { hasGlobalAccess: bool
         >
           Inbox Configuration
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'bot-config'}
+          className={['wa-settings-tab', tab === 'bot-config' ? 'wa-settings-tab--active' : ''].filter(Boolean).join(' ')}
+          onClick={() => setTab('bot-config')}
+        >
+          Bot Configuration
+        </button>
         {me.is_superuser ? (
           <button
             type="button"
@@ -144,6 +154,14 @@ function AdministrationSettings({ hasGlobalAccess, me }: { hasGlobalAccess: bool
           <ErrorState error={officesQuery.error} onRetry={officesQuery.refetch} />
         ) : (
           <SettingsInboxConfigPanel me={me} offices={officesQuery.status === 'success' ? officesQuery.data : []} />
+        )
+      ) : null}
+
+      {tab === 'bot-config' ? (
+        officesQuery.status === 'error' && hasGlobalAccess ? (
+          <ErrorState error={officesQuery.error} onRetry={officesQuery.refetch} />
+        ) : (
+          <SettingsBotConfigPanel me={me} offices={officesQuery.status === 'success' ? officesQuery.data : []} />
         )
       ) : null}
 

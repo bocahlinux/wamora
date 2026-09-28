@@ -57,6 +57,15 @@ placement before implementation.
   WhatsApp bot detection. Open: menu content/config mechanism, esamsat API
   contract, session/log data model, relationship to the existing
   session/reconciliation model.
+  **2026-09-28 update**: a Conversation/Bot Engine foundation covering the
+  dynamic-menu/trigger/session part of this is now built and live-verified
+  (see `docs/16-MASTER-ROADMAP.md` Section 5) — `apps.bot` (admin-configurable
+  menus/triggers/config, no hardcoded content) + `apps.chats.conversation_engine`
+  (the resolver, replacing the old Phase 12/13 auto-reply handlers). The
+  session/log data model question above was resolved as relational
+  (`ConversationSession`/`Message`), not a per-session JSON blob. Still
+  genuinely open/not built: esamsat API lookup itself, and the typing-delay
+  simulation.
 - **Blast template + esamsat integration**: blast messages sendable from a
   template, sourced from/integrated with the esamsat backend API. Delay of
   1 minute between bulk sends (distinct from the 60s per-message delay

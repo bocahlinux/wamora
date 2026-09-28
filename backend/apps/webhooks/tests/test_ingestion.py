@@ -6,7 +6,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.chats.models import Chat, Contact, Message
-from apps.offices.models import Office, OfficeInboxConfig
+from apps.offices.models import Office
 from apps.waha_sessions.models import WahaSession
 from apps.webhooks.models import WebhookEvent
 from apps.webhooks.parsing import ParsedMessage, parse_envelope
@@ -291,35 +291,41 @@ class OfficeRoutedInboxVisibilityTests(TestCase):
         self.assertEqual(visible, {self.chat_a.pk, self.chat_b.pk})
 
 
-class WebhookOperatorChatIntegrationTests(TestCase):
-    """Step 12 — proves the real `ingest_webhook()` -> `persist_message()`
-    -> `handle_operator_chat_message()` wiring, through the actual live
-    webhook entrypoint (not calling `handle_operator_chat_message`
-    directly, unlike `apps.chats.test_operator_chat`'s unit tests)."""
+class WebhookConversationEngineIntegrationTests(TestCase):
+    """Conversation/Bot Engine — proves the real `ingest_webhook()` ->
+    `persist_message()` -> `handle_conversation_message()` wiring, through
+    the actual live webhook entrypoint (not calling
+    `handle_conversation_message` directly, unlike
+    `apps.chats.test_conversation_engine`'s unit tests). Supersedes the
+    old Step 12 `WebhookOperatorChatIntegrationTests` — `ingest_webhook`
+    no longer calls `apps.chats.operator_chat` at all (see
+    `apps.webhooks.services`'s own comment)."""
 
     def setUp(self):
-        office = Office.objects.create(name='Samsat Palangka Raya')
-        OfficeInboxConfig.objects.create(office=office, enabled=True)
+        from apps.bot.models import BotConfig, BotMenu
 
-    @mock.patch('apps.chats.operator_chat.send_blast_message')
-    def test_new_inbound_webhook_message_triggers_operator_chat_menu(self, mocked_send):
+        menu = BotMenu.objects.create(name='Main Menu', intro_text='Selamat datang.')
+        BotConfig.objects.create(office=None, enabled=True, root_menu=menu)
+
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_new_inbound_webhook_message_triggers_the_bot(self, mocked_send):
         envelope = parse_envelope(INBOUND_MESSAGE_ENVELOPE)
         ingest_webhook(envelope)
         mocked_send.assert_called_once()
-        self.assertIn('Samsat Palangka Raya', mocked_send.call_args[0][2])
+        self.assertIn('Selamat datang.', mocked_send.call_args[0][2])
 
-    @mock.patch('apps.chats.operator_chat.send_blast_message')
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
     def test_duplicate_webhook_delivery_sends_the_auto_reply_only_once(self, mocked_send):
         envelope = parse_envelope(INBOUND_MESSAGE_ENVELOPE)
         ingest_webhook(envelope)  # first delivery
         ingest_webhook(envelope)  # WAHA retry of the SAME event
         mocked_send.assert_called_once()
 
-    @mock.patch('apps.chats.operator_chat.send_blast_message')
-    def test_reconciliation_history_backfill_never_triggers_the_auto_reply(self, mocked_send):
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_reconciliation_history_backfill_never_triggers_the_bot(self, mocked_send):
         # persist_message() is shared with apps.sync.reconciliation, which
         # calls it directly (bypassing ingest_webhook) for old history —
-        # that path must never send a fresh "select an Office" reply.
+        # that path must never send a fresh bot reply.
         session = WahaSession.objects.create(name='reconcile-session')
         persist_message(session, _parsed_message(chat_provider_id='old-chat@lid'))
         mocked_send.assert_not_called()
@@ -336,62 +342,39 @@ def _envelope(session_name, chat_id, body, event_id):
     return parse_envelope(raw)
 
 
-class WebhookInboxWelcomeLifecycleIntegrationTests(TestCase):
-    """Step 13 — proves the real `ingest_webhook()` -> branch-by-`Chat.office`
-    -> `handle_inbox_lifecycle_message()` wiring through the actual live
-    webhook entrypoint, and the Step 12/13 handoff timing."""
+class WebhookConversationEngineOfficeScopedIntegrationTests(TestCase):
+    """Conversation/Bot Engine — proves the real `ingest_webhook()` wiring
+    still applies an Office-specific `BotConfig`/`BotMenu` once a Chat has
+    a selected Office, through the actual live webhook entrypoint.
+    Supersedes the old Step 13 welcome-lifecycle integration tests
+    (`welcome_sent_at`/`OfficeInboxConfig.welcome_message` are no longer
+    read by the live webhook path at all — see `Chat.welcome_sent_at`'s
+    own deprecation comment)."""
 
     def setUp(self):
+        from apps.bot.models import BotConfig, BotMenu
+
         self.office = Office.objects.create(name='Samsat Palangka Raya')
-        self.config = OfficeInboxConfig.objects.create(
-            office=self.office, enabled=True, welcome_message='Selamat datang.'
-        )
+        office_menu = BotMenu.objects.create(office=self.office, name='Menu Office', intro_text='Menu khusus Office.')
+        BotConfig.objects.create(office=self.office, enabled=True, root_menu=office_menu)
         self.session_name = 'no_epahari'
 
-    # -- H: Chat.office NULL stays Step 12's job, welcome never fires --------
-
-    @mock.patch('apps.chats.inbox_lifecycle.send_blast_message')
-    @mock.patch('apps.chats.operator_chat.send_blast_message')
-    def test_unmapped_chat_uses_office_selection_not_welcome(self, mocked_operator_send, mocked_welcome_send):
-        ingest_webhook(_envelope(self.session_name, 'wp-h@lid', 'Halo', 'evt-h1'))
-        mocked_operator_send.assert_called_once()  # Step 12 menu
-        mocked_welcome_send.assert_not_called()
-
-    # -- I: selection turn -> no welcome; NEXT inbound -> welcome once -------
-
-    @mock.patch('apps.chats.inbox_lifecycle.send_blast_message')
-    @mock.patch('apps.chats.operator_chat.send_blast_message')
-    def test_welcome_starts_only_from_the_message_after_office_selection(self, mocked_operator_send, mocked_welcome_send):
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_chat_with_an_office_uses_that_offices_bot_config(self, mocked_send):
         chat_id = 'wp-i@lid'
-        # Turn 1: first contact, still unmapped -> Step 12 menu.
+        session = WahaSession.objects.create(name=self.session_name)
+        Chat.objects.create(session=session, provider_chat_id=chat_id, office=self.office)
+
         ingest_webhook(_envelope(self.session_name, chat_id, 'Halo', 'evt-i1'))
-        mocked_welcome_send.assert_not_called()
 
-        # Turn 2: WP replies with the Office's own ID -> Step 12 sets
-        # Chat.office and sends its OWN confirmation text — welcome must
-        # NOT also fire on this same turn (Step 13's documented timing).
-        ingest_webhook(_envelope(self.session_name, chat_id, str(self.office.pk), 'evt-i2'))
-        chat = Chat.objects.get(session__name=self.session_name, provider_chat_id=chat_id)
-        self.assertEqual(chat.office, self.office)
-        mocked_welcome_send.assert_not_called()
+        mocked_send.assert_called_once()
+        self.assertIn('Menu khusus Office.', mocked_send.call_args[0][2])
 
-        # Turn 3: next inbound message, Chat.office already set -> welcome
-        # fires exactly once.
-        ingest_webhook(_envelope(self.session_name, chat_id, 'ok', 'evt-i3'))
-        mocked_welcome_send.assert_called_once()
-        self.assertEqual(mocked_welcome_send.call_args[0][2], 'Selamat datang.')
-
-        # Turn 4: yet another message -> no second welcome.
-        ingest_webhook(_envelope(self.session_name, chat_id, 'ok lagi', 'evt-i4'))
-        mocked_welcome_send.assert_called_once()
-
-    # -- J: reconciliation never sends welcome ---------------------------------
-
-    @mock.patch('apps.chats.inbox_lifecycle.send_blast_message')
-    def test_reconciliation_never_sends_welcome_even_with_a_mapped_office(self, mocked_welcome_send):
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_reconciliation_never_sends_a_bot_reply_even_with_a_mapped_office(self, mocked_send):
         session = WahaSession.objects.create(name='reconcile-welcome-session')
         chat = Chat.objects.create(session=session, provider_chat_id='old-mapped@lid', office=self.office)
         persist_message(session, _parsed_message(chat_provider_id='old-mapped@lid', provider_message_id='hist-1'))
-        mocked_welcome_send.assert_not_called()
+        mocked_send.assert_not_called()
         chat.refresh_from_db()
         self.assertIsNone(chat.welcome_sent_at)

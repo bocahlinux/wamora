@@ -26,6 +26,7 @@ urlpatterns = [
     path('api/chats/', include('apps.chats.urls')),
     path('api/sync/', include('apps.sync.api_urls')),
     path('api/blast/', include('apps.blast.urls')),
+    path('api/bot/', include('apps.bot.urls')),
     path('api/', include('apps.offices.urls')),
     path('internal/', include('apps.operations.urls')),
     path('internal/', include('apps.audit.urls')),

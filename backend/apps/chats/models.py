@@ -49,15 +49,20 @@ class Chat(TimeStampedModel):
     # WAHA read/seen integration can populate this same field without an
     # API/UI contract change.
     last_read_at = models.DateTimeField(null=True, blank=True)
-    # Step 13 (Inbox welcome lifecycle) — nullable, stamped exactly once,
-    # the moment the welcome message is actually sent for this Chat (never
-    # pre-emptively, never retroactively for a Chat that already existed
-    # before this field did — no backfill). Doubles as the idempotency
-    # guard: `Chat.objects.filter(pk=..., welcome_sent_at__isnull=True)
-    # .update(...)` (apps/chats/inbox_lifecycle.py) is the sole compare-
-    # and-set claim that lets at most one concurrent webhook delivery for
-    # the same Chat actually send it — same discipline as every other
-    # state-changing write in this project (apps.blast.views, apps.sync.views).
+    # DEPRECATED / LEGACY as of the Conversation Engine (ConversationSession,
+    # below) — no longer read or written by the live webhook path
+    # (`apps.chats.conversation_engine` replaces `apps.chats.inbox_lifecycle`
+    # as of that change; see that module's own module-level docstring).
+    # Left in place deliberately, per explicit instruction: no destructive
+    # migration without separate approval. Its original purpose (Step 13,
+    # one-time welcome send, compare-and-set idempotency guard) is now
+    # superseded by ConversationSession's own lifecycle — a session's
+    # intro/greeting text is shown every time its menu is (re)opened, not
+    # gated by a per-Chat "ever welcomed" flag; duplicate-webhook safety
+    # now comes from `Message`'s own `(session, provider_message_id)`
+    # uniqueness ensuring the engine is invoked at most once per real
+    # message, not from a claim on this field. Do not read or write this
+    # field in any new code.
     welcome_sent_at = models.DateTimeField(null=True, blank=True)
     # Step 14 (Operator assignment & availability foundation) — current
     # assignment only, not a history table (deliberately out of this
@@ -80,6 +85,106 @@ class Chat(TimeStampedModel):
 
     def __str__(self):
         return self.name or self.provider_chat_id
+
+
+# Module-level, not class attributes, so both `ConversationSession.STATE_CHOICES`
+# and the `Meta.constraints` Q object below can share exactly one spelling
+# — a nested `Meta` class can't see its outer class's own attributes at
+# class-body-evaluation time (same convention already established by
+# `apps.offices.models`'s own `ROLE_GLOBAL_ADMIN`/etc. and
+# `apps.blast.models.OPERATION_TYPE_BLAST_SEND`).
+CONVERSATION_STATE_NEW = 'new'
+CONVERSATION_STATE_ACTIVE = 'active'
+CONVERSATION_STATE_WAITING_OPERATOR = 'waiting_operator'
+CONVERSATION_STATE_COMPLETED = 'completed'
+
+# Only NEW/ACTIVE/WAITING_OPERATOR ever count as "the active session" for
+# a Chat — enforced at the DB level (partial unique index on
+# ConversationSession.Meta.constraints below), not just in application
+# code, so a race between two near-simultaneous webhook deliveries for
+# the same Chat can never create two concurrently-active sessions.
+CONVERSATION_ACTIVE_STATES = [
+    CONVERSATION_STATE_NEW, CONVERSATION_STATE_ACTIVE, CONVERSATION_STATE_WAITING_OPERATOR,
+]
+
+
+class ConversationSession(TimeStampedModel):
+    """Conversation/Bot Engine — one pass of a Chat through the bot's
+    menu tree. Deliberately colocated with `Chat`/`Message` (not in
+    `apps.bot`, which owns only the *configuration* the bot reads, not
+    per-Chat runtime state) — same "runtime data lives with its owning
+    entity" split `apps.blast.models.BlastRecipient` vs.
+    `apps.blast.serializers`-level config already establishes.
+
+    A Chat may have MANY `ConversationSession` rows over time (approved
+    design, explicit requirement — history is never deleted, a new
+    global-trigger match or a fresh contact after COMPLETED always
+    creates a new row rather than reusing/resetting an old one).
+    `on_delete=PROTECT` on `chat`, matching this project's convention for
+    every other FK to a durable entity — deleting a Chat with session
+    history must be an explicit, deliberate action.
+
+    Deliberately does NOT reuse `Chat.welcome_sent_at` or
+    `Chat.office` as its own state — `welcome_sent_at` is left in place,
+    unused by this engine, documented as deprecated/legacy (see its own
+    field comment); `office` here is a SEPARATE, per-session value that
+    gets synced onto `Chat.office` only when set (see `office`'s own
+    comment) — the two fields answer different questions that usually,
+    but not always, agree."""
+
+    # Convenience aliases so callers can still write
+    # `ConversationSession.STATE_NEW` etc. — plain re-exports of the
+    # module-level constants above, safe because these are only ever
+    # read after class-body evaluation completes, never from `Meta`.
+    STATE_NEW = CONVERSATION_STATE_NEW
+    STATE_ACTIVE = CONVERSATION_STATE_ACTIVE
+    STATE_WAITING_OPERATOR = CONVERSATION_STATE_WAITING_OPERATOR
+    STATE_COMPLETED = CONVERSATION_STATE_COMPLETED
+    STATE_CHOICES = [
+        (CONVERSATION_STATE_NEW, 'New'),
+        (CONVERSATION_STATE_ACTIVE, 'Active'),
+        (CONVERSATION_STATE_WAITING_OPERATOR, 'Waiting for operator (extension point only — no assignment logic here)'),
+        (CONVERSATION_STATE_COMPLETED, 'Completed'),
+    ]
+    ACTIVE_STATES = CONVERSATION_ACTIVE_STATES
+
+    chat = models.ForeignKey('Chat', on_delete=models.PROTECT, related_name='conversation_sessions')
+    state = models.CharField(max_length=32, choices=STATE_CHOICES, default=CONVERSATION_STATE_NEW)
+    # The menu tree position — a generic `state` value (above) plus this
+    # FK is what "current_menu determines position, not one state per
+    # menu level" (approved design) means concretely: NEW/ACTIVE says
+    # roughly what phase the session is in; this FK says exactly where
+    # in the tree. Null only when a WAITING_OPERATOR/COMPLETED session no
+    # longer has a meaningful "current" menu.
+    current_menu = models.ForeignKey(
+        'bot.BotMenu', on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
+    )
+    # The Office THIS session routed its citizen to (set only if/when the
+    # Office-selector menu, apps.bot.models.BotMenu.is_office_selector,
+    # is reached and completed) — deliberately separate from `Chat.office`
+    # (which exists for Inbox-visibility/RBAC purposes, Step 5, and is
+    # kept in sync by apps.chats.conversation_engine whenever this field
+    # is set, never the reverse). A later session for the same Chat can
+    # pick a DIFFERENT Office than an earlier one; `Chat.office` always
+    # reflects the most recent selection.
+    office = models.ForeignKey(Office, on_delete=models.PROTECT, null=True, blank=True, related_name='+')
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['chat'],
+                condition=models.Q(state__in=CONVERSATION_ACTIVE_STATES),
+                name='unique_active_conversation_session_per_chat',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['chat', 'state']),
+        ]
+
+    def __str__(self):
+        return f'{self.chat_id} [{self.state}]'
 
 
 class Message(TimeStampedModel):
