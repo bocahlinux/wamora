@@ -249,6 +249,22 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # configurable rather than hardcoded. See docs/generated/PHASE-5-CELERY-REDIS.md.
 RECONCILIATION_INTERVAL_SECONDS = int(os.environ.get('RECONCILIATION_INTERVAL_SECONDS', '900'))
 
+# Conversation Engine (apps.chats.tasks.expire_waiting_operator_sessions_task)
+# — how long a WAITING_OPERATOR ConversationSession may sit unclosed
+# before it is auto-completed so the bot resumes answering (discussed
+# requirement: "tutup dalam 1x24 jam" if an operator never manually
+# closes it via apps.chats.views.ChatCloseSessionView). Configurable, not
+# hardcoded, same convention as RECONCILIATION_INTERVAL_SECONDS above.
+CONVERSATION_WAITING_OPERATOR_TIMEOUT_SECONDS = int(
+    os.environ.get('CONVERSATION_WAITING_OPERATOR_TIMEOUT_SECONDS', str(24 * 60 * 60))
+)
+# How often the periodic expiry scan itself runs — independent of the
+# timeout threshold above; checking every 15 minutes is precise enough
+# for a 24-hour cutoff.
+CONVERSATION_EXPIRY_SCAN_INTERVAL_SECONDS = int(
+    os.environ.get('CONVERSATION_EXPIRY_SCAN_INTERVAL_SECONDS', '900')
+)
+
 # Targeted-reconciliation trigger executor —
 # docs/generated/INBOX-OUTBOUND-RECONCILIATION-IMPLEMENTATION-REPORT.md.
 # Selects HOW apps.sync.executors.trigger_reconciliation() runs a

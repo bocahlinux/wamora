@@ -91,6 +91,34 @@ class Role(TimeStampedModel):
         return self.name
 
 
+class UserProfile(TimeStampedModel):
+    """Every User's small, role-independent profile — deliberately
+    separate from `OfficeMembership` (which a Superadmin never has at
+    all, per that model's own "Superadmin, who needs none" precedent)
+    since `initial` must be readable for EVERY role, Superadmin
+    included. Colocated in this app (not `apps.authn`, which has no
+    models of its own) because user creation already lives here
+    (`UserCreateSerializer`/`UserListCreateView`).
+
+    Discussed requirement: `initial` is set by whoever creates the user
+    (Superadmin/Global Admin/Office Admin, via `UserCreateSerializer`)
+    and shown to a citizen when that user claims a chat
+    (`apps.chats.assignment.claim_chat`'s own notification) — a short
+    signature, e.g. "RD", never the full name. Every role may also edit
+    their OWN `initial` (`apps.offices.views.MyProfileView`, self-service).
+
+    `on_delete=CASCADE` on `user` (not `PROTECT`) — unlike every
+    Office/Role FK in this project, a User's own profile has no
+    independent meaning once the User itself is deleted; there is
+    nothing to "reassign first"."""
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile')
+    initial = models.CharField(max_length=10, blank=True, default='')
+
+    def __str__(self):
+        return f'{self.user.username} ({self.initial or "—"})'
+
+
 class OfficeMembership(TimeStampedModel):
     """User -> (optionally) Office, plus that user's `Role` (feature
     access AND organizational standing — see `Role`'s own docstring).

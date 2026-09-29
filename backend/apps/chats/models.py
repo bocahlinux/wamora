@@ -212,6 +212,31 @@ class Message(TimeStampedModel):
     body = models.TextField(blank=True)
     status = models.CharField(max_length=32, blank=True)
     timestamp = models.DateTimeField()
+    # Discussed requirement — per-Office Inbox history partitioning: a
+    # SNAPSHOT of `chat.office` at the moment this Message was persisted
+    # (`apps.webhooks.services.persist_message`, the only writer),
+    # deliberately never updated afterward even if `chat.office` later
+    # changes (a citizen picking a DIFFERENT Office later must not
+    # retroactively relabel earlier history — `Chat.office`'s own comment
+    # already documents that it "always reflects the most recent
+    # selection", which is exactly what this field intentionally does
+    # NOT do). `null` for every message sent before a citizen has ever
+    # selected an Office in the current handoff round (including the
+    # bot's own pre-handoff menu navigation) — `ChatMessagesView` treats
+    # `null` the same as "not this Office's history", never guessed into
+    # one. `on_delete=PROTECT`, same as every other Office FK in this
+    # project — deleting an Office with message history must be explicit.
+    office = models.ForeignKey(Office, on_delete=models.PROTECT, null=True, blank=True, related_name='+')
+    # Discussed requirement — Conversation/Bot Engine interactive list
+    # menus. The stable `rowId` a citizen tapped (WAHA's
+    # `listResponseMessage.singleSelectReply.selectedRowID`,
+    # `apps.webhooks.parsing.ParsedMessage.list_reply_row_id`) — blank for
+    # every ordinary message, including a manually-TYPED reply to a list
+    # menu. `apps.chats.conversation_engine` prefers this over `body` for
+    # matching a tap unambiguously (label text alone can't disambiguate
+    # paginated "Selanjutnya"/"Sebelumnya" rows across more than one
+    # page — see that module's own pagination comments).
+    list_reply_id = models.CharField(max_length=64, blank=True, default='')
 
     class Meta:
         constraints = [

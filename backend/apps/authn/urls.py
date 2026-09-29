@@ -1,6 +1,6 @@
 from django.urls import path
 
-from apps.offices.views import OperatorAvailabilityView
+from apps.offices.views import MyProfileView, OperatorAvailabilityView
 
 from .views import LoginView, MeView
 
@@ -12,4 +12,8 @@ urlpatterns = [
     # it mutates); the URL lives here so it reads naturally alongside the
     # existing /api/auth/me/ identity endpoint.
     path('me/availability/', OperatorAvailabilityView.as_view(), name='auth-me-availability'),
+    # Discussed requirement — self-service name/initial/password editing,
+    # same "lives in apps.offices, URL reads naturally under /api/auth/me/"
+    # precedent as the availability endpoint above.
+    path('me/profile/', MyProfileView.as_view(), name='auth-me-profile'),
 ]

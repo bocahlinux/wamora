@@ -150,3 +150,94 @@ describe('POST /internal/blast/send', () => {
     expect(djangoCalls).toHaveLength(0);
   });
 });
+
+// Discussed requirement — Conversation/Bot Engine interactive list
+// menus. New ALLOWLISTED WAHA operation (sendList, CLAUDE.md rule 5) —
+// sendText above is completely untouched. Request shape live-verified by
+// the project operator directly against this deployment's WAHA (GOWS
+// engine) before this route was written.
+const SEND_LIST_URL = '/internal/blast/send-list';
+
+describe('POST /internal/blast/send-list', () => {
+  let app: Express;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { createApp } = await import('../src/app');
+    app = createApp();
+  });
+
+  const sampleList = {
+    title: 'Main Menu',
+    description: 'Silakan pilih:',
+    footer: '',
+    button: 'Pilih',
+    sections: [{ title: 'Main', rows: [{ title: 'Option 1', rowId: '1', description: null }] }],
+  };
+
+  it('rejects a request with no X-Office-Dispatch-Key header', async () => {
+    const res = await request(app).post(SEND_LIST_URL).send({ session: 'test_session', chatId: 'c1@lid', list: sampleList });
+    expect(res.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown session name', async () => {
+    const res = await request(app)
+      .post(SEND_LIST_URL)
+      .set('X-Office-Dispatch-Key', 'office-dispatch-secret')
+      .send({ session: 'some-other-session', chatId: 'c1@lid', list: sampleList });
+    expect(res.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requires chatId and list', async () => {
+    const res = await request(app)
+      .post(SEND_LIST_URL)
+      .set('X-Office-Dispatch-Key', 'office-dispatch-secret')
+      .send({ session: 'test_session' });
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('calls WAHA sendList (not sendText) and passes the list payload through verbatim as `message`', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 'wa-msg-2' }));
+
+    const res = await request(app)
+      .post(SEND_LIST_URL)
+      .set('X-Office-Dispatch-Key', 'office-dispatch-secret')
+      .set('Idempotency-Key', 'bot:1:menu')
+      .send({ session: 'test_session', chatId: 'c1@lid', list: sampleList });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'sent', providerMessageId: 'wa-msg-2', idempotencyKey: 'bot:1:menu' });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/api/sendList');
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body).toEqual({ session: 'test_session', chatId: 'c1@lid', message: sampleList, reply_to: null });
+  });
+
+  it('reports failed (HTTP 200) when WAHA returns a clean error', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ message: 'bad request' }), { status: 400 }));
+
+    const res = await request(app)
+      .post(SEND_LIST_URL)
+      .set('X-Office-Dispatch-Key', 'office-dispatch-secret')
+      .send({ session: 'test_session', chatId: 'c1@lid', list: sampleList });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('failed');
+  });
+
+  it('never leaks the WAHA API key in any response', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 'wa-msg-2' }));
+    const res = await request(app)
+      .post(SEND_LIST_URL)
+      .set('X-Office-Dispatch-Key', 'office-dispatch-secret')
+      .send({ session: 'test_session', chatId: 'c1@lid', list: sampleList });
+    expect(JSON.stringify(res.body)).not.toContain('test-waha-api-key');
+  });
+});

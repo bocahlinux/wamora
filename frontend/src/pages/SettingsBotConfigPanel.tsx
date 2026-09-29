@@ -33,8 +33,6 @@ import {
   type BotMenuItem,
   type BotMenuItemActionType,
   type BotTrigger,
-  type Me,
-  type Office,
 } from '../lib/djangoApi';
 import './SettingsPage.css';
 
@@ -53,31 +51,29 @@ interface ScopedData {
   triggers: BotTrigger[];
 }
 
-// Conversation/Bot Engine admin UI — same office-scope-picker convention
-// as SettingsInboxConfigPanel.tsx: a globally-accessing actor picks
-// GLOBAL or any Office; an Office Admin is fixed to their own Office
-// (GLOBAL config/menus/triggers are read-only for them — the server 403s
-// any write attempt, this UI just never offers the GLOBAL option at all).
-export function SettingsBotConfigPanel({ me, offices }: { me: Me; offices: Office[] }) {
-  const hasGlobalAccess = me.has_global_access;
-  const fixedOfficeId = hasGlobalAccess ? undefined : (me.office?.id ?? null);
-  const [pickedOfficeId, setPickedOfficeId] = useState<number | 'global' | ''>(hasGlobalAccess ? 'global' : '');
-  const officeId: number | undefined = hasGlobalAccess
-    ? pickedOfficeId === 'global' || pickedOfficeId === ''
-      ? undefined
-      : pickedOfficeId
-    : (fixedOfficeId ?? undefined);
-  const scopeReady = hasGlobalAccess ? pickedOfficeId !== '' : fixedOfficeId != null;
-
+// Conversation/Bot Engine admin UI — GLOBAL only. There is exactly ONE
+// shared bot across every Office (discussed requirement: "bot ini
+// berlaku untuk semua office") — per-Office menu/trigger/config content
+// is no longer an available admin workflow at all, not even for a
+// Superadmin/Global Admin (this panel is already restricted to them —
+// apps.bot.views._may_access — but previously still offered an
+// office-scope picker left over from before that decision, which was
+// confusing and is removed here). `office=<id>`-scoped `BotConfig`/
+// `BotMenu`/`BotTrigger` rows remain a supported *data shape* server-side
+// (nothing deleted, per this project's "no destructive change without
+// approval" convention) — this UI simply never creates or targets one.
+// An Office's own on/off switch for direct citizen chat remains
+// `OfficeInboxConfig.enabled`, via SettingsInboxConfigPanel.tsx — a
+// separate, pre-existing concern this panel never touches.
+export function SettingsBotConfigPanel() {
   const [subTab, setSubTab] = useState<SubTab>('config');
   const [state, setState] = useState<
     { status: 'loading' } | { status: 'error'; error: ApiError } | { status: 'success'; data: ScopedData } | null
   >(null);
 
   function refetch() {
-    if (!scopeReady) return;
     setState({ status: 'loading' });
-    Promise.all([getBotConfig(officeId), getBotMenus(officeId), getBotTriggers(officeId)]).then(
+    Promise.all([getBotConfig(undefined), getBotMenus(undefined), getBotTriggers(undefined)]).then(
       ([configResult, menusResult, triggersResult]) => {
         if (!configResult.ok) {
           setState({ status: 'error', error: configResult.error });
@@ -100,13 +96,9 @@ export function SettingsBotConfigPanel({ me, offices }: { me: Me; offices: Offic
   }
 
   useEffect(() => {
-    if (!scopeReady) {
-      setState(null);
-      return;
-    }
     refetch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [officeId, scopeReady]);
+  }, []);
 
   return (
     <Card>
@@ -114,30 +106,7 @@ export function SettingsBotConfigPanel({ me, offices }: { me: Me; offices: Offic
         <span className="wa-settings-panel__title">Bot Configuration</span>
       </div>
 
-      {hasGlobalAccess ? (
-        <div className="wa-settings-form__field">
-          <label className="wa-settings-form__label" htmlFor="bot-config-scope">
-            Scope
-          </label>
-          <select
-            id="bot-config-scope"
-            className="wa-settings-form__select"
-            value={pickedOfficeId}
-            onChange={(e) => setPickedOfficeId(e.target.value === 'global' ? 'global' : e.target.value ? Number(e.target.value) : '')}
-          >
-            <option value="global">Global (shared default)</option>
-            {offices.map((office) => (
-              <option key={office.id} value={office.id}>
-                {office.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      ) : fixedOfficeId == null ? (
-        <EmptyState icon={Bot} title="No Office assigned" description="You are not assigned to any Office; contact an administrator." />
-      ) : null}
-
-      {!scopeReady ? null : state === null || state.status === 'loading' ? (
+      {state === null || state.status === 'loading' ? (
         <LoadingState label="Loading bot configuration…" />
       ) : state.status === 'error' ? (
         <ErrorState error={state.error} onRetry={refetch} />
@@ -160,16 +129,15 @@ export function SettingsBotConfigPanel({ me, offices }: { me: Me; offices: Offic
 
           {subTab === 'config' ? (
             <BotConfigForm
-              key={officeId ?? 'global'}
-              officeId={officeId}
+              officeId={undefined}
               config={state.data.config}
               menus={state.data.menus}
               onSaved={(updated) => setState({ status: 'success', data: { ...state.data, config: updated } })}
             />
           ) : subTab === 'menus' ? (
-            <BotMenusSection officeId={officeId} menus={state.data.menus} onChanged={refetch} />
+            <BotMenusSection officeId={undefined} menus={state.data.menus} onChanged={refetch} />
           ) : (
-            <BotTriggersSection officeId={officeId} menus={state.data.menus} triggers={state.data.triggers} onChanged={refetch} />
+            <BotTriggersSection officeId={undefined} menus={state.data.menus} triggers={state.data.triggers} onChanged={refetch} />
           )}
         </>
       )}
@@ -192,6 +160,8 @@ function BotConfigForm({
   const [fallbackMessage, setFallbackMessage] = useState(config.fallback_message);
   const [sessionCompletedMessage, setSessionCompletedMessage] = useState(config.session_completed_message);
   const [rootMenu, setRootMenu] = useState<number | ''>(config.root_menu ?? '');
+  const [listFooterText, setListFooterText] = useState(config.list_footer_text);
+  const [listButtonText, setListButtonText] = useState(config.list_button_text);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [saved, setSaved] = useState(false);
@@ -206,6 +176,8 @@ function BotConfigForm({
       fallback_message: fallbackMessage,
       session_completed_message: sessionCompletedMessage,
       root_menu: rootMenu === '' ? null : rootMenu,
+      list_footer_text: listFooterText,
+      list_button_text: listButtonText,
     });
     setBusy(false);
     if (!result.ok) {
@@ -273,6 +245,31 @@ function BotConfigForm({
           disabled={busy}
         />
         <p className="wa-settings-form__hint">Sent when a flow completes, telling the user how to start again.</p>
+      </div>
+
+      <div className="wa-settings-form__field">
+        <Input
+          label="List footer text"
+          value={listFooterText}
+          onChange={(e) => setListFooterText(e.target.value)}
+          disabled={busy}
+        />
+        <p className="wa-settings-form__hint">
+          Shown at the bottom of every interactive list menu the bot sends (may be left blank).
+        </p>
+      </div>
+
+      <div className="wa-settings-form__field">
+        <Input
+          label="List button text"
+          value={listButtonText}
+          onChange={(e) => setListButtonText(e.target.value)}
+          disabled={busy}
+          maxLength={32}
+        />
+        <p className="wa-settings-form__hint">
+          The tap-to-open label on every interactive list menu (defaults to "Pilih" if left blank).
+        </p>
       </div>
 
       {error ? <ErrorState error={error} /> : null}
@@ -452,6 +449,10 @@ function BotMenuForm({
   async function handleSubmit() {
     const trimmed = name.trim();
     if (!trimmed || busy) return;
+    if (/[^\x00-\x7F]/.test(introText)) {
+      setError({ kind: 'validation', message: 'Intro text must not contain emoji or other non-ASCII characters.' });
+      return;
+    }
     setBusy(true);
     setError(null);
     const payload = {
@@ -507,7 +508,10 @@ function BotMenuForm({
           onChange={(e) => setIntroText(e.target.value)}
           disabled={busy}
         />
-        <p className="wa-settings-form__hint">Shown every time this menu is displayed — not a one-time greeting.</p>
+        <p className="wa-settings-form__hint">
+          Shown every time this menu is displayed — not a one-time greeting. No emoji or other non-ASCII characters
+          (the database cannot store them).
+        </p>
       </div>
 
       <label className="wa-settings-checkbox-row">

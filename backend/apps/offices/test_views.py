@@ -188,6 +188,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         payload = {
             'username': 'newuser',
             'password': 'a-strong-password',
+            'initial': 'NU',
             'role': self.role_operator.pk,
             'office': self.office_a.pk,
         }
@@ -204,6 +205,50 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._global_admin()
         response = self.client.post('/api/users/', self._create_payload(), format='json', **self._auth_header(actor))
         self.assertEqual(response.status_code, 201)
+
+    def test_created_user_has_the_given_initial(self):
+        actor = self._superadmin()
+        self.client.post('/api/users/', self._create_payload(initial='RD'), format='json', **self._auth_header(actor))
+        response = self.client.get('/api/users/', **self._auth_header(actor))
+        row = next(r for r in response.data if r['username'] == 'newuser')
+        self.assertEqual(row['initial'], 'RD')
+
+    def test_creating_a_user_without_an_initial_is_rejected(self):
+        actor = self._superadmin()
+        payload = self._create_payload()
+        del payload['initial']
+        response = self.client.post('/api/users/', payload, format='json', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 400)
+
+    def test_username_with_a_space_is_rejected(self):
+        actor = self._superadmin()
+        response = self.client.post(
+            '/api/users/', self._create_payload(username='new user'), format='json', **self._auth_header(actor),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(username='new user').exists())
+
+    def test_username_with_an_at_sign_is_rejected(self):
+        actor = self._superadmin()
+        response = self.client.post(
+            '/api/users/', self._create_payload(username='new@user'), format='json', **self._auth_header(actor),
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_username_with_dot_and_underscore_is_accepted(self):
+        actor = self._superadmin()
+        response = self.client.post(
+            '/api/users/', self._create_payload(username='new.user_01'), format='json', **self._auth_header(actor),
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(User.objects.filter(username='new.user_01').exists())
+
+    def test_duplicate_username_is_rejected(self):
+        actor = self._superadmin()
+        self.client.post('/api/users/', self._create_payload(), format='json', **self._auth_header(actor))
+        response = self.client.post('/api/users/', self._create_payload(), format='json', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(User.objects.filter(username='newuser').count(), 1)
 
     def test_created_user_password_is_hashed_never_plaintext(self):
         actor = self._superadmin()
@@ -435,7 +480,7 @@ class RoleScopeSyncTests(OfficesUsersApiTestCase):
         bare_role = self._role('Bare Office Admin', is_office_admin=True)
         response = self.client.post(
             '/api/users/',
-            {'username': 'newadmin', 'password': 'a-strong-password', 'role': bare_role.pk, 'office': self.office_a.pk},
+            {'username': 'newadmin', 'password': 'a-strong-password', 'initial': 'NA', 'role': bare_role.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
@@ -448,7 +493,7 @@ class RoleScopeSyncTests(OfficesUsersApiTestCase):
         role = self._role('Office Admin+', is_office_admin=True, scopes=['reading', 'blast', ADMIN_SCOPE])
         response = self.client.post(
             '/api/users/',
-            {'username': 'newadmin2', 'password': 'a-strong-password', 'role': role.pk, 'office': self.office_a.pk},
+            {'username': 'newadmin2', 'password': 'a-strong-password', 'initial': 'NA', 'role': role.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
@@ -461,7 +506,7 @@ class RoleScopeSyncTests(OfficesUsersApiTestCase):
         actor = self._superadmin()
         response = self.client.post(
             '/api/users/',
-            {'username': 'newoperator', 'password': 'a-strong-password', 'role': self.role_operator.pk, 'office': self.office_a.pk},
+            {'username': 'newoperator', 'password': 'a-strong-password', 'initial': 'NO', 'role': self.role_operator.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
@@ -478,7 +523,7 @@ class RoleScopeSyncTests(OfficesUsersApiTestCase):
         role = self._role('Reader Op', is_operator=True, scopes=['reading'])
         response = self.client.post(
             '/api/users/',
-            {'username': 'notsneaky', 'password': 'a-strong-password', 'role': role.pk, 'office': self.office_a.pk},
+            {'username': 'notsneaky', 'password': 'a-strong-password', 'initial': 'NS', 'role': role.pk, 'office': self.office_a.pk},
             format='json',
             **self._auth_header(actor),
         )
@@ -491,7 +536,7 @@ class RoleScopeSyncTests(OfficesUsersApiTestCase):
         role = self._role('Sneaky Global', grants_global_access=True, scopes=['reading'])
         response = self.client.post(
             '/api/users/',
-            {'username': 'sneaky', 'password': 'a-strong-password', 'role': role.pk, 'office': None},
+            {'username': 'sneaky', 'password': 'a-strong-password', 'initial': 'SN', 'role': role.pk, 'office': None},
             format='json',
             **self._auth_header(actor),
         )

@@ -2,20 +2,19 @@
 frontend-facing (JWTAuthentication), same trust boundary as
 `apps.offices.views`/`apps.blast.views` (a logged-in human's browser).
 
-Authorization reuses `apps.offices.authorization` directly — no new
-primitive invented, per the approved design's explicit instruction
-("Gunakan pola authorization existing sebagai dasar desain"):
-- A GLOBAL resource (`office=None` — the shared Main Menu, global
-  triggers, the GLOBAL `BotConfig`) may only be read/written by a
-  globally-accessing actor (Superadmin/Global Admin) — an Office Admin
-  editing the GLOBAL Main Menu would affect every other Office, the same
-  class of reasoning `apps.offices.views.OfficeListCreateView` already
-  applies to Offices themselves.
-- An Office-scoped resource follows the same `_admin_scope()`-equivalent
-  rule `OfficeInboxConfigView` already uses: Superadmin/Global Admin
-  reach any Office; an Office Admin only their own; Operator/no-membership
-  get 403.
-"""
+Authorization: Superadmin/Global Admin ONLY, for every resource this
+module owns (`BotConfig`, `BotMenu`, `BotMenuItem`, `BotTrigger`),
+regardless of `?office=`/body `office`. Revised per explicit discussion
+(docs/generated — bot menu/trigger content decided by superadmin only):
+an Office Admin creating its own menu/trigger content is what caused a
+live bug (a half-configured, disabled per-Office `BotConfig` silently
+shadowing the enabled GLOBAL one for every Chat routed to that Office —
+see `BotConfigView.get()`'s own docstring) and fragments what should be
+ONE shared bot across every Office. `apps.offices.models.OfficeInboxConfig.enabled`
+(via `apps.offices.views.OfficeInboxConfigView`, unaffected by this
+module) remains the one thing an Office Admin may still toggle:
+"does my Office accept a direct handoff to a human operator" — a
+separate, pre-existing concern this module never touches."""
 
 from django.db.models import ProtectedError
 from rest_framework.permissions import IsAuthenticated
@@ -24,7 +23,7 @@ from rest_framework.views import APIView
 
 from apps.authn.authentication import JWTAuthentication
 from apps.authn.permissions import HasUserAdministrationScope
-from apps.offices.authorization import get_user_office, has_global_access, is_office_admin_role
+from apps.offices.authorization import has_global_access
 from apps.offices.models import Office
 
 from .models import BotConfig, BotMenu, BotMenuItem, BotTrigger
@@ -37,17 +36,11 @@ def _error(request, http_status, code, message):
 
 
 def _may_access(user, office):
-    """`office=None` (GLOBAL resource) — only a globally-accessing actor.
-    `office` given — globally-accessing actor (any Office) or an Office
-    Admin of exactly that Office. Mirrors `apps.offices.views._admin_scope()`
-    without importing it directly (that helper is private to that module) —
-    same three functions (`has_global_access`/`is_office_admin_role`/
-    `get_user_office`) it's itself built from."""
-    if has_global_access(user):
-        return True
-    if office is None:
-        return False
-    return is_office_admin_role(user) and get_user_office(user) is not None and get_user_office(user).pk == office.pk
+    """Superadmin/Global Admin only — `office` is accepted (and still
+    validated by `_resolve_office_param`/the serializer) purely so an
+    invalid id still 400s before this check runs; it no longer grants an
+    Office Admin access to their own Office's bot content."""
+    return has_global_access(user)
 
 
 def _resolve_office_param(request):
@@ -71,25 +64,37 @@ class BotConfigView(APIView):
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated, HasUserAdministrationScope]
 
-    def _get_or_create(self, request):
+    def _resolve(self, request):
         office, error = _resolve_office_param(request)
         if error is not None:
             return None, error
         if not _may_access(request.user, office):
             return None, _error(request, 403, 'forbidden', 'You do not have access to this Bot configuration.')
-        config, _created = BotConfig.objects.get_or_create(office=office)
-        return config, None
+        return office, None
 
     def get(self, request):
-        config, error = self._get_or_create(request)
+        """Read-only — deliberately does NOT persist a row (unlike the
+        `OfficeInboxConfig` lazy-singleton precedent this class's own
+        docstring cites): an admin merely opening this Office's Bot
+        Configuration tab must never create a real, DB-durable
+        `enabled=False` override that then silently shadows the GLOBAL
+        config for every Chat already routed to that Office (found live:
+        an inbound WhatsApp message went unanswered purely because a
+        prior GET had persisted such a row). An unsaved, in-memory
+        default (`id=None`) is returned instead when no row exists yet —
+        a real row is only ever created by `patch()`, an explicit admin
+        save."""
+        office, error = self._resolve(request)
         if error is not None:
             return error
+        config = BotConfig.objects.filter(office=office).first() or BotConfig(office=office)
         return Response(BotConfigSerializer(config).data)
 
     def patch(self, request):
-        config, error = self._get_or_create(request)
+        office, error = self._resolve(request)
         if error is not None:
             return error
+        config, _created = BotConfig.objects.get_or_create(office=office)
         serializer = BotConfigSerializer(config, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()

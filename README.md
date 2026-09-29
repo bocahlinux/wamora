@@ -111,3 +111,18 @@ It has no canonical phase number yet (see `docs/16-MASTER-ROADMAP.md`
 Section 5) and is live-verified against the real dev WAHA/BFF stack for
 outbound delivery; a genuine device-originated inbound test is still
 outstanding.
+
+Since that foundation landed, the Bot Engine has been extended with
+interactive WhatsApp list menus (WAHA `sendList`, allowlisted alongside
+the pre-existing `sendText`) with rowId-based reply matching and paginated
+office selection, plus admin-configurable list chrome (footer/button
+text). Inbox chat handling gained an explicit claim/transfer model — an
+operator must claim a chat before replying, cross-office visibility of
+past history is kept separate from the (stricter) right to manage a chat,
+and claiming a chat sends an automatic WhatsApp notification built from
+the Office's welcome message plus the claiming user's initial. Every role
+now has a self-service profile (name, initial, password), username
+creation is validated against duplicates and an allowed character set,
+and admin-entered bot menu text is validated to reject emoji/non-ASCII
+characters (the shared Postgres database's `SQL_ASCII` encoding cannot
+store them).

@@ -26,3 +26,13 @@ def _setup_periodic_tasks(sender, **kwargs):
         app.signature('apps.sync.tasks.reconcile_all_sessions_task'),
         name='reconcile-all-sessions',
     )
+
+    # Conversation Engine — auto-expires a WAITING_OPERATOR
+    # ConversationSession nobody manually closed within
+    # settings.CONVERSATION_WAITING_OPERATOR_TIMEOUT_SECONDS (default 24h).
+    # See apps.chats.tasks's own docstring.
+    sender.add_periodic_task(
+        settings.CONVERSATION_EXPIRY_SCAN_INTERVAL_SECONDS,
+        app.signature('apps.chats.tasks.expire_waiting_operator_sessions_task'),
+        name='expire-waiting-operator-sessions',
+    )

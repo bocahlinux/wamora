@@ -82,7 +82,16 @@ def select_office_for_chat(session: WahaSession, chat_provider_id: str, office_i
     still a valid destination, sets that Chat's `office` — creating the
     Chat if it does not already exist (same `get_or_create` idiom as
     `apps.webhooks.services.persist_message`), but WITHOUT touching
-    `session.office` or any other Chat field.
+    `session.office`.
+
+    Also clears `chat.assigned_to` — found live: picking a NEW handoff
+    round (even back to the same Office) left the PREVIOUS round's
+    assignee in place, which made this Chat silently invisible to
+    `apps.dashboard.views.PendingChatsView`'s `assigned_to__isnull=True`
+    filter — nobody at the newly-selected Office was ever notified a
+    citizen was waiting, since the case still looked "already handled"
+    by whoever closed the last round. A fresh round always needs to be
+    claimed again, regardless of who handled the previous one.
 
     Returns `(chat, None)` on success, or `(None, error_code)` — one of
     `OFFICE_NOT_FOUND` (no such Office at all) or `OFFICE_UNAVAILABLE`
@@ -99,7 +108,8 @@ def select_office_for_chat(session: WahaSession, chat_provider_id: str, office_i
 
     chat, _ = Chat.objects.get_or_create(session=session, provider_chat_id=chat_provider_id)
     chat.office = office
-    chat.save(update_fields=['office', 'updated_at'])
+    chat.assigned_to = None
+    chat.save(update_fields=['office', 'assigned_to', 'updated_at'])
     return chat, None
 
 

@@ -67,6 +67,31 @@ class ParseMessageTests(SimpleTestCase):
         self.assertIsNone(parsed.sender_alt)
         self.assertEqual(parsed.chat_provider_id, '000000000000000@lid')
 
+    def test_list_reply_row_id_extracted_from_real_confirmed_shape(self):
+        # Discussed requirement — Conversation/Bot Engine interactive
+        # list menus. Shape below is the EXACT structure captured from a
+        # real WebhookEvent.payload (project operator tapped a live
+        # `sendList` row) — never guessed from WAHA's general docs.
+        payload = {
+            'id': 'x', 'from': 'abc@lid', 'fromMe': False, 'body': 'Option 1',
+            '_data': {
+                'Info': {'Chat': 'abc@lid', 'Sender': 'abc@lid', 'MediaType': 'list_response'},
+                'Message': {
+                    'listResponseMessage': {
+                        'title': 'Option 1',
+                        'singleSelectReply': {'selectedRowID': 'option1'},
+                    },
+                },
+            },
+        }
+        parsed = parse_message(payload)
+        self.assertEqual(parsed.body, 'Option 1')
+        self.assertEqual(parsed.list_reply_row_id, 'option1')
+
+    def test_list_reply_row_id_is_none_for_an_ordinary_text_message(self):
+        parsed = parse_message(INBOUND_MESSAGE_ENVELOPE['payload'])
+        self.assertIsNone(parsed.list_reply_row_id)
+
     def test_missing_alt_identifier_is_none_not_error(self):
         payload = {
             'id': 'x',

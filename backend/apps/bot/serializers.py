@@ -9,6 +9,21 @@ from rest_framework import serializers
 from .models import BotConfig, BotMenu, BotMenuItem, BotTrigger
 
 
+def _reject_non_ascii(value, field_label):
+    # The shared Postgres database is SQL_ASCII (existing infra, not
+    # something this app controls). Any non-ASCII character (emoji
+    # included) stored here can get echoed back inside a WAHA webhook
+    # payload later and crash JSON ingestion at the DB layer. Blocking it
+    # at input time is cheaper than a DB encoding migration.
+    offenders = sorted({c for c in value if ord(c) > 127})
+    if offenders:
+        raise serializers.ValidationError(
+            f'{field_label} must not contain emoji or other non-ASCII characters '
+            f'(found: {" ".join(offenders)}).'
+        )
+    return value
+
+
 class BotMenuItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = BotMenuItem
@@ -45,6 +60,9 @@ class BotMenuSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('name must not be blank.')
         return value
 
+    def validate_intro_text(self, value):
+        return _reject_non_ascii(value, 'intro_text')
+
 
 class BotTriggerSerializer(serializers.ModelSerializer):
     class Meta:
@@ -68,6 +86,6 @@ class BotConfigSerializer(serializers.ModelSerializer):
         model = BotConfig
         fields = [
             'id', 'office', 'enabled', 'fallback_message', 'session_completed_message', 'root_menu',
-            'created_at', 'updated_at',
+            'list_footer_text', 'list_button_text', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']

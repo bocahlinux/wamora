@@ -8,13 +8,15 @@ from rest_framework.test import APITestCase
 from apps.audit.models import AuditLog
 from apps.authn.jwt_utils import issue_access_token
 from apps.authn.tests.keys import generate_test_key_pair
-from apps.chats.models import Chat, Message
+from apps.chats.models import Chat, ConversationSession, Message
+from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OPERATOR, Office, OfficeMembership, Role
 from apps.waha_sessions.models import WahaSession
 from apps.webhooks.models import WebhookEvent
 
 PRIVATE_PEM, PUBLIC_PEM = generate_test_key_pair()
 MESSAGES_URL = '/api/dashboard/messages/'
 ACTIVITY_URL = '/api/dashboard/activity/'
+PENDING_CHATS_URL = '/api/dashboard/pending-chats/'
 
 
 @override_settings(
@@ -165,3 +167,86 @@ class ActivityFeedViewTests(DashboardEndpointsTestCase):
     def test_invalid_limit_falls_back_to_default(self):
         response = self.client.get(f'{ACTIVITY_URL}?limit=not-a-number', **self._auth_header())
         self.assertEqual(response.status_code, 200)
+
+
+@override_settings(
+    JWT_PRIVATE_KEY=PRIVATE_PEM,
+    JWT_PUBLIC_KEY=PUBLIC_PEM,
+    JWT_ISSUER='test-issuer',
+    JWT_AUDIENCE='test-audience',
+)
+class PendingChatsViewTests(APITestCase):
+    """GET /api/dashboard/pending-chats/ — the handoff queue. Reuses
+    `apps.chats.authorization.chats_visible_to` for Office boundary, so
+    these tests only need to confirm THIS view applies the
+    waiting_operator + unassigned filter correctly, plus the one
+    discussed edge case (office=None visible to a globally-accessing
+    actor only)."""
+
+    def setUp(self):
+        self.office_a = Office.objects.create(name='Office A')
+        self.office_b = Office.objects.create(name='Office B')
+        self.session = WahaSession.objects.create(name='primary')
+        self.role_operator = Role.objects.get_or_create(name=ROLE_OPERATOR, defaults={'is_operator': True})[0]
+        self.role_global_admin = Role.objects.get_or_create(
+            name=ROLE_GLOBAL_ADMIN, defaults={'grants_global_access': True},
+        )[0]
+
+    def _auth_header(self, user):
+        token = issue_access_token(user)['access_token']
+        return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
+
+    def _office_user(self, username, office, role):
+        user = User.objects.create_user(username, password='pw')
+        group, _ = Group.objects.get_or_create(name='reading')
+        user.groups.add(group)
+        OfficeMembership.objects.create(user=user, office=office, role=role, requires_office=not role.grants_global_access)
+        return user
+
+    def _waiting_chat(self, provider_chat_id, office):
+        chat = Chat.objects.create(
+            session=self.session, provider_chat_id=provider_chat_id, office=office, last_message_at=timezone.now(),
+        )
+        ConversationSession.objects.create(chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR)
+        return chat
+
+    def test_unassigned_waiting_chat_appears_for_own_office(self):
+        chat = self._waiting_chat('wp1@lid', self.office_a)
+        user = self._office_user('op_a', self.office_a, self.role_operator)
+
+        response = self.client.get(PENDING_CHATS_URL, **self._auth_header(user))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['id'], chat.pk)
+
+    def test_office_b_operator_does_not_see_office_a_pending_chat(self):
+        self._waiting_chat('wp1@lid', self.office_a)
+        user = self._office_user('op_b', self.office_b, self.role_operator)
+
+        response = self.client.get(PENDING_CHATS_URL, **self._auth_header(user))
+
+        self.assertEqual(response.data['count'], 0)
+
+    def test_already_assigned_chat_does_not_appear(self):
+        chat = self._waiting_chat('wp1@lid', self.office_a)
+        assignee = self._office_user('op_taken', self.office_a, self.role_operator)
+        chat.assigned_to = assignee
+        chat.save(update_fields=['assigned_to'])
+        viewer = self._office_user('op_viewer', self.office_a, self.role_operator)
+
+        response = self.client.get(PENDING_CHATS_URL, **self._auth_header(viewer))
+
+        self.assertEqual(response.data['count'], 0)
+
+    def test_office_none_pending_chat_visible_only_to_global_admin(self):
+        self._waiting_chat('wp1@lid', None)
+        operator = self._office_user('op_c', self.office_a, self.role_operator)
+        global_admin = self._office_user('gadmin', None, self.role_global_admin)
+
+        operator_response = self.client.get(PENDING_CHATS_URL, **self._auth_header(operator))
+        admin_response = self.client.get(PENDING_CHATS_URL, **self._auth_header(global_admin))
+
+        self.assertEqual(operator_response.data['count'], 0)
+        self.assertEqual(admin_response.data['count'], 1)
+        self.assertIsNone(admin_response.data['results'][0]['office'])

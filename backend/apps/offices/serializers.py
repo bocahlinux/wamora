@@ -23,12 +23,24 @@ own Office, no matter what the client sends — "jangan mempercayai Office
 arbitrary dari client" applies here exactly as it did for Blast.
 """
 
+import re
+
 from django.conf import settings
 from django.contrib.auth.models import Group, User
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import Office, OfficeInboxConfig, OfficeMembership, Role
+from .models import Office, OfficeInboxConfig, OfficeMembership, Role, UserProfile
+
+# Discussed requirement — username creation rule (Superadmin/Global
+# Admin/Office Admin, UserCreateSerializer below): letters (either case),
+# digits, dot (.), underscore (_) only. Nothing else — no spaces, no other
+# punctuation. Django's own default `User.username` validator is far more
+# permissive (allows @+-), so this is checked explicitly, not inherited.
+USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9._]+$')
+USERNAME_RULE_MESSAGE = (
+    'username may only contain letters, numbers, dot (.) and underscore (_).'
+)
 
 # `_sync_role_groups` replaces the previous hardcoded `ROLE_GROUPS`
 # mapping (Global/Office Admin -> a fixed ('user administration', 'blast',
@@ -136,14 +148,22 @@ class UserSerializer(serializers.ModelSerializer):
 
     role = serializers.SerializerMethodField()
     office = serializers.SerializerMethodField()
+    initial = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             'id', 'username', 'first_name', 'last_name', 'is_active',
-            'is_superuser', 'role', 'office', 'date_joined',
+            'is_superuser', 'role', 'office', 'initial', 'date_joined',
         ]
         read_only_fields = fields
+
+    def get_initial(self, obj):
+        # `select_related('profile')` in `_users_queryset()` — no per-row
+        # query. `''` for a user created before UserProfile existed
+        # (never backfilled, this project's own established convention).
+        profile = getattr(obj, 'profile', None)
+        return profile.initial if profile else ''
 
     def get_role(self, obj):
         membership = getattr(obj, 'office_membership', None)
@@ -178,6 +198,12 @@ class UserCreateSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, min_length=8)
     first_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
     last_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
+    # Discussed requirement — set by whoever creates the user, shown to a
+    # citizen when this user claims a chat (apps.chats.assignment.claim_chat's
+    # own notification, sourced from apps.offices.models.UserProfile).
+    # Required (not blank) at creation time — never silently absent for a
+    # notification that will need it later.
+    initial = serializers.CharField(max_length=10)
     role = serializers.PrimaryKeyRelatedField(queryset=Role.objects.all())
     office = serializers.PrimaryKeyRelatedField(queryset=Office.objects.all(), required=False, allow_null=True)
 
@@ -185,8 +211,16 @@ class UserCreateSerializer(serializers.Serializer):
         value = value.strip()
         if not value:
             raise serializers.ValidationError('username must not be blank.')
+        if not USERNAME_PATTERN.match(value):
+            raise serializers.ValidationError(USERNAME_RULE_MESSAGE)
         if User.objects.filter(username=value).exists():
             raise serializers.ValidationError('A user with this username already exists.')
+        return value
+
+    def validate_initial(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('initial must not be blank.')
         return value
 
     def validate(self, attrs):
@@ -208,11 +242,13 @@ class UserCreateSerializer(serializers.Serializer):
         role = validated_data.pop('role')
         office = validated_data.pop('office', None)
         password = validated_data.pop('password')
+        initial = validated_data.pop('initial')
         with transaction.atomic():
             user = User.objects.create_user(password=password, **validated_data)
             OfficeMembership.objects.create(
                 user=user, role=role, office=office, requires_office=not role.grants_global_access
             )
+            UserProfile.objects.create(user=user, initial=initial)
             _sync_role_groups(user, role)
         return user
 
@@ -227,6 +263,7 @@ class UserProfileUpdateSerializer(serializers.Serializer):
     last_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     is_active = serializers.BooleanField(required=False)
+    initial = serializers.CharField(max_length=10, required=False, allow_blank=False)
 
 
 class MembershipUpdateSerializer(serializers.Serializer):
@@ -243,6 +280,27 @@ class MembershipUpdateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         _validate_role_office(attrs['role'], attrs.get('office'))
+        return attrs
+
+
+class MyProfileUpdateSerializer(serializers.Serializer):
+    """PATCH /api/auth/me/profile/ — discussed requirement: every role
+    (Superadmin/Global Admin/Office Admin/Operator alike) may edit their
+    OWN name, initial and password — always optional (partial), always
+    `request.user`'s own row (enforced in `views.py`, never a target
+    `pk`), same self-service shape as `OperatorAvailabilitySerializer`.
+    Changing the password requires `current_password` (re-authentication,
+    not just an active session) — checked in `views.py`, not here."""
+
+    first_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    last_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    initial = serializers.CharField(max_length=10, required=False, allow_blank=False)
+    current_password = serializers.CharField(write_only=True, required=False)
+    new_password = serializers.CharField(write_only=True, required=False, min_length=8)
+
+    def validate(self, attrs):
+        if 'new_password' in attrs and 'current_password' not in attrs:
+            raise serializers.ValidationError({'current_password': 'Required to change your password.'})
         return attrs
 
 

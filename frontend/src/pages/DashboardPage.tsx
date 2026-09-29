@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Activity, Database, MessageSquare, RefreshCw, Server, ShieldCheck, Smartphone, TriangleAlert, Webhook, Wifi, Zap } from 'lucide-react';
+import { Activity, Database, Inbox, MessageSquare, RefreshCw, Server, ShieldCheck, Smartphone, TriangleAlert, Webhook, Wifi, Zap } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../components/ui/Button';
@@ -13,12 +13,14 @@ import { mapActivityResult, mapSyncStatus, mapWahaStatus, StatusBadge } from '..
 import type { ApiError } from '../lib/api';
 import { getBffHealth, getSessionStatus, type SessionStatus } from '../lib/bffApi';
 import { config } from '../lib/config';
-import type { ActivityItem, DashboardActivity, DashboardMessages, SyncStatus } from '../lib/djangoApi';
+import type { ActivityItem, DashboardActivity, DashboardMessages, PendingChat, SyncStatus } from '../lib/djangoApi';
 import {
+  claimChat,
   getBackendHealth,
   getDashboardActivity,
   getDashboardMessages,
   getDatabaseHealth,
+  getPendingChats,
   getRedisHealth,
   getSyncStatus,
   recoverSyncCheckpoint,
@@ -385,6 +387,93 @@ function SyncStatusCard({ sessionName }: { sessionName: string }) {
   );
 }
 
+// Discussed requirement (Conversation/Bot Engine handoff-to-operator
+// queue) — GET /api/dashboard/pending-chats/. Polled independently of
+// the rest of the Dashboard, on a shorter interval than
+// SyncStatusCard's, since this drives an actionable "needs a human now"
+// notification rather than a background health indicator.
+const PENDING_CHATS_POLL_MS = 15000;
+
+function PendingChatsCard() {
+  const [chats, setChats] = useState<PendingChat[] | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
+  const [claimBusyId, setClaimBusyId] = useState<number | null>(null);
+  const [claimError, setClaimError] = useState<{ id: number; error: ApiError } | null>(null);
+
+  const fetchPending = useCallback(async () => {
+    const result = await getPendingChats();
+    if (result.ok) {
+      setChats(result.data.results);
+      setError(null);
+    } else {
+      setError(result.error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPending();
+    const interval = setInterval(fetchPending, PENDING_CHATS_POLL_MS);
+    return () => clearInterval(interval);
+  }, [fetchPending]);
+
+  async function handleClaim(chatId: number) {
+    if (claimBusyId !== null) return;
+    setClaimBusyId(chatId);
+    setClaimError(null);
+    const result = await claimChat(chatId);
+    setClaimBusyId(null);
+    if (!result.ok) {
+      setClaimError({ id: chatId, error: result.error });
+      // Someone else may have already taken it — refresh the list either way.
+      fetchPending();
+      return;
+    }
+    setChats((prev) => (prev ? prev.filter((c) => c.id !== chatId) : prev));
+  }
+
+  return (
+    <Card className="wa-metric-card wa-metric-card--activity">
+      <div className="wa-health-card__icon wa-health-card__icon--primary">
+        <Inbox size={20} strokeWidth={1.75} aria-hidden="true" />
+      </div>
+      <div className="wa-metric-card__body">
+        <div className="wa-health-card__title-row">
+          <p className="wa-health-card__title">Pesan Menunggu Petugas</p>
+          {chats && chats.length > 0 ? <StatusBadge status="error" label={`${chats.length} menunggu`} /> : null}
+        </div>
+        {chats === null && !error ? (
+          <LoadingState label="Memuat…" />
+        ) : error ? (
+          <ErrorState error={error} onRetry={fetchPending} />
+        ) : chats && chats.length === 0 ? (
+          <EmptyState icon={Inbox} title="Tidak ada yang menunggu" description="Semua percakapan sudah ditangani." />
+        ) : (
+          <ul className="wa-activity-list">
+            {chats?.map((chat) => (
+              <li key={chat.id} className="wa-activity-list__item">
+                <Inbox size={16} strokeWidth={1.75} aria-hidden="true" className="wa-activity-list__icon" />
+                <div className="wa-activity-list__body">
+                  <p className="wa-activity-list__action">
+                    {chat.contact_name || chat.phone_number || chat.provider_chat_id}
+                  </p>
+                  <p className="wa-activity-list__target">
+                    {chat.office ? chat.office.name : 'Belum ada Office (semua nonaktif)'}
+                    {chat.waiting_since ? ` · sejak ${new Date(chat.waiting_since).toLocaleString()}` : ''}
+                  </p>
+                </div>
+                <Button variant="secondary" disabled={claimBusyId === chat.id} onClick={() => handleClaim(chat.id)}>
+                  {claimBusyId === chat.id ? 'Mengambil…' : 'Ambil'}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {claimError ? <ErrorState error={claimError.error} /> : null}
+      </div>
+    </Card>
+  );
+}
+
 // Dashboard structure follows wamora-design-assets design spec Section 10
 // ("Row 1 — system health", "Row 2 — sessions + activity"). Row 1's
 // Redis card (docs/generated/PHASE9-1C-REDIS-HEALTH-IMPLEMENTATION-REPORT.md,
@@ -438,6 +527,10 @@ export function DashboardPage() {
   return (
     <div>
       <PageHeader title="Dashboard" description="Overview of your WhatsApp operations and system status" />
+
+      <section className="wa-dashboard__row2" aria-label="Pending handoff to operator">
+        <PendingChatsCard />
+      </section>
 
       <section className="wa-dashboard__health-row" aria-label="System health">
         <HealthCard icon={Wifi} tint="primary" title="WAHA" query={wahaQuery} />

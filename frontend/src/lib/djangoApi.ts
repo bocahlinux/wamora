@@ -65,6 +65,11 @@ export interface Me {
   /** Step 14 — `null` for anyone without a membership row; only
    * meaningful alongside `role.is_operator`. */
   is_available: boolean | null;
+  /** Discussed requirement — `''` for anyone who hasn't set one yet
+   * (apps.offices.models.UserProfile, self-editable via /profile). Used
+   * to append "- {initial}" to every manually-typed Inbox reply
+   * (InboxPage.tsx's handleSend). */
+  initial: string;
 }
 
 /** GET /api/auth/me/ — docs/generated/PHASE-8-DASHBOARD-BACKEND-FOUNDATION-REPORT.md
@@ -115,6 +120,32 @@ export function getDashboardActivity(limit: number) {
   });
 }
 
+export interface PendingChat {
+  id: number;
+  provider_chat_id: string;
+  contact_name: string | null;
+  phone_number: string | null;
+  office: { id: number; name: string } | null;
+  waiting_since: string | null;
+}
+
+export interface PendingChatsResponse {
+  count: number;
+  results: PendingChat[];
+}
+
+/** GET /api/dashboard/pending-chats/ — Conversation/Bot Engine handoff
+ * queue: unclaimed chats currently waiting for a human operator. An
+ * Office Admin/Operator sees only their own Office's; a Superadmin/
+ * Global Admin sees every Office's, plus any chat with no Office at all
+ * (every Office currently declined direct chat, or none was ever
+ * selected) — the one case only a globally-accessing actor can see. */
+export function getPendingChats() {
+  return request<PendingChatsResponse>(`${config.djangoBaseUrl}/api/dashboard/pending-chats/`, {
+    headers: authHeader(),
+  });
+}
+
 // Inbox/Chat (canonical Phase 8) — docs/generated/INBOX-CHAT-DECISION-REPORT.md.
 // Frontend -> Django direct for reads (Section 1 of that report), matching
 // the Dashboard precedent above. Sending a message is NOT here — it stays
@@ -150,6 +181,20 @@ export interface ChatSummary {
   last_read_at: string | null;
   unread: boolean;
   assigned_to: AssignedOperator | null;
+  /** Conversation/Bot Engine — true while this Chat has a
+   * ConversationSession handed off to a human operator (state
+   * waiting_operator). Drives the "Tutup Sesi Bot" button; the server
+   * re-checks this independently on close, this field only decides
+   * whether to show the control. */
+  waiting_for_operator: boolean;
+  /** Whether the viewer may currently manage THIS chat (assign/unassign/
+   * claim/close-session/reply) — false for an Office that used to own
+   * this chat but no longer does (its own past history stays visible,
+   * chats_visible_to's own docstring, but never editable). Always true
+   * for Superadmin/Global Admin. Drives the composer and the assignment/
+   * close-session controls alike — the server re-checks independently
+   * on every mutating call, this field only decides what to show. */
+  can_manage: boolean;
 }
 
 /** GET /api/chats/ — paginated, most-recently-active chat first.
@@ -193,6 +238,42 @@ export function assignChat(chatId: number, userId: number) {
  * the Inbox; only clears assigned_to. */
 export function unassignChat(chatId: number) {
   return request<ChatSummary>(`${config.djangoBaseUrl}/api/chats/${chatId}/unassign/`, {
+    method: 'POST',
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/chats/:id/transfer/ — body {office_id, user_id}.
+ * Superadmin/Global Admin only — moves the chat to a DIFFERENT Office
+ * and a specific member of it in one step, even while a
+ * WAITING_OPERATOR session is open (the one action exempt from the
+ * "close the session first" rule assign/unassign enforce). */
+export function transferChat(chatId: number, officeId: number, userId: number) {
+  return request<ChatSummary>(`${config.djangoBaseUrl}/api/chats/${chatId}/transfer/`, {
+    method: 'POST',
+    body: { office_id: officeId, user_id: userId },
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/chats/:id/claim/ — no body, always self-assigns the caller
+ * (the "ambil" action for a pending chat surfaced on the Dashboard).
+ * Returns `error.code` `already_claimed` (someone else got there first)
+ * or `not_eligible` (not a valid claimant for this chat) on 400. */
+export function claimChat(chatId: number) {
+  return request<ChatSummary>(`${config.djangoBaseUrl}/api/chats/${chatId}/claim/`, {
+    method: 'POST',
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/chats/:id/close-session/ — no body. Manually ends this
+ * chat's waiting_operator ConversationSession — the bot resumes
+ * answering the citizen's next message afterward. Returns an `error`
+ * with code `no_active_session` (400) if this chat has no session
+ * currently waiting for an operator. */
+export function closeChatSession(chatId: number) {
+  return request<ChatSummary>(`${config.djangoBaseUrl}/api/chats/${chatId}/close-session/`, {
     method: 'POST',
     headers: authHeader(),
   });
@@ -596,6 +677,10 @@ export interface AdminUser {
   /** `null` for a globally-accessing Role (by design — not tied to one
    * Office) or a Superadmin. */
   office: { id: number; name: string } | null;
+  /** Discussed requirement — short signature (e.g. "RD") set at
+   * creation, shown to a citizen when this user claims a chat. `''` for
+   * a user created before this field existed (never backfilled). */
+  initial: string;
   date_joined: string;
 }
 
@@ -615,6 +700,9 @@ export interface CreateUserInput {
   password: string;
   first_name?: string;
   last_name?: string;
+  /** Required — letters/digits/dot/underscore, at least 1 character
+   * (server-enforced; see USERNAME_PATTERN's own comment for why). */
+  initial: string;
   /** A Role id. Required for a non-globally-accessing Role; omit (or
    * send null) `office` for a Role with `grants_global_access`. Only a
    * globally-accessing actor may pick a Role that itself has
@@ -641,6 +729,7 @@ export interface UpdateUserInput {
   last_name?: string;
   password?: string;
   is_active?: boolean;
+  initial?: string;
   /** `role` (a Role id) and `office` must be sent together
    * (UserDetailView.patch) — omit both to leave Office role/membership
    * untouched. Only a globally-accessing actor may pick a Role with
@@ -656,6 +745,42 @@ export interface UpdateUserInput {
  * (403). */
 export function updateUser(id: number, patch: UpdateUserInput) {
   return request<AdminUser>(`${config.djangoBaseUrl}/api/users/${id}/`, {
+    method: 'PATCH',
+    body: patch,
+    headers: authHeader(),
+  });
+}
+
+export interface MyProfile {
+  id: number;
+  username: string;
+  first_name: string;
+  last_name: string;
+  initial: string;
+}
+
+/** GET /api/auth/me/profile/ — discussed requirement: every role's own
+ * self-service profile (name, initial). Always the caller's own row. */
+export function getMyProfile() {
+  return request<MyProfile>(`${config.djangoBaseUrl}/api/auth/me/profile/`, { headers: authHeader() });
+}
+
+export interface UpdateMyProfileInput {
+  first_name?: string;
+  last_name?: string;
+  initial?: string;
+  /** Both required together to change the password — server rejects
+   * `new_password` without `current_password` (re-authentication, not
+   * just an active session). */
+  current_password?: string;
+  new_password?: string;
+}
+
+/** PATCH /api/auth/me/profile/ — self-service only; always the caller's
+ * own row. Returns `error.code` `invalid_password` (400) if
+ * `current_password` doesn't match when changing the password. */
+export function updateMyProfile(patch: UpdateMyProfileInput) {
+  return request<MyProfile>(`${config.djangoBaseUrl}/api/auth/me/profile/`, {
     method: 'PATCH',
     body: patch,
     headers: authHeader(),
@@ -727,6 +852,12 @@ export interface BotConfig {
   fallback_message: string;
   session_completed_message: string;
   root_menu: number | null;
+  /** Discussed requirement — Conversation/Bot Engine interactive list
+   * menus (WAHA's `sendList`). Shown on every menu this bot sends as a
+   * list. `list_footer_text` may be blank; `list_button_text` defaults
+   * server-side to "Pilih" if left blank. */
+  list_footer_text: string;
+  list_button_text: string;
   created_at: string;
   updated_at: string;
 }
@@ -740,7 +871,10 @@ export function getBotConfig(officeId?: number) {
 }
 
 export type UpdateBotConfigInput = Partial<
-  Pick<BotConfig, 'enabled' | 'fallback_message' | 'session_completed_message' | 'root_menu'>
+  Pick<
+    BotConfig,
+    'enabled' | 'fallback_message' | 'session_completed_message' | 'root_menu' | 'list_footer_text' | 'list_button_text'
+  >
 >;
 
 export function updateBotConfig(officeId: number | undefined, patch: UpdateBotConfigInput) {

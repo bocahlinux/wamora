@@ -81,3 +81,58 @@ def send_blast_message(session_name: str, destination: str, text: str, idempoten
         'status': data['status'],
         'provider_message_id': data.get('providerMessageId') if isinstance(data.get('providerMessageId'), str) else None,
     }
+
+
+def send_list_message(session_name: str, destination: str, list_payload: dict, idempotency_key: str) -> dict:
+    """POST to the BFF's internal list-send endpoint
+    (`POST /internal/blast/send-list`, `bff/src/routes/internalBlast.ts`)
+    — Conversation/Bot Engine interactive list menus
+    (`apps.chats.conversation_engine`). Same request/response contract as
+    `send_blast_message` above, just a different WAHA operation
+    underneath (`sendList`, CLAUDE.md rule 5 — a new, explicitly
+    allowlisted endpoint, `sendText` untouched). `list_payload` is WAHA's
+    own `message` object shape (`title`/`description`/`footer`/`button`/
+    `sections`), live-verified by the project operator directly against
+    this deployment's WAHA (GOWS engine) — passed through unchanged, this
+    function never reshapes it.
+
+    Never logs or includes `settings.OFFICE_DISPATCH_SERVICE_KEY` in any
+    exception message."""
+    if not settings.BFF_INTERNAL_BASE_URL:
+        raise BffDispatchError('BFF_INTERNAL_BASE_URL is not configured')
+    if not settings.OFFICE_DISPATCH_SERVICE_KEY:
+        raise BffDispatchError('OFFICE_DISPATCH_SERVICE_KEY is not configured')
+
+    url = f"{settings.BFF_INTERNAL_BASE_URL.rstrip('/')}/internal/blast/send-list"
+    timeout_seconds = settings.BFF_INTERNAL_TIMEOUT_MS / 1000
+
+    try:
+        response = requests.post(
+            url,
+            json={'session': session_name, 'chatId': destination, 'list': list_payload},
+            headers={
+                'X-Office-Dispatch-Key': settings.OFFICE_DISPATCH_SERVICE_KEY,
+                'Idempotency-Key': idempotency_key,
+            },
+            timeout=timeout_seconds,
+        )
+    except requests.RequestException as exc:
+        logger.warning('BFF list-dispatch request failed: %s', type(exc).__name__)
+        raise BffDispatchError(f'BFF request failed: {type(exc).__name__}') from exc
+
+    if response.status_code != 200:
+        logger.warning('BFF list-dispatch returned HTTP %s', response.status_code)
+        raise BffDispatchError(f'BFF returned HTTP {response.status_code}')
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise BffDispatchError('BFF response was not valid JSON') from exc
+
+    if not isinstance(data, dict) or data.get('status') not in ('sent', 'failed', 'unknown'):
+        raise BffDispatchError('Unrecognized BFF list-dispatch response shape')
+
+    return {
+        'status': data['status'],
+        'provider_message_id': data.get('providerMessageId') if isinstance(data.get('providerMessageId'), str) else None,
+    }

@@ -63,23 +63,44 @@ class BotApiTestCase(APITestCase):
 
 
 class BotConfigViewTests(BotApiTestCase):
-    def test_superadmin_can_get_and_create_global_config(self):
+    def test_superadmin_can_get_global_config_without_persisting_a_row(self):
+        # GET must never have the side effect of creating a durable,
+        # disabled BotConfig override just from being viewed — see
+        # BotConfigView.get()'s own docstring for the live bug this
+        # regression-guards (an office-specific row silently shadowing
+        # the enabled GLOBAL config for every Chat routed to that Office).
         actor = self._superadmin()
         response = self.client.get('/api/bot/config/', **self._auth_header(actor))
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.data['office'])
-        self.assertTrue(BotConfig.objects.filter(office=None).exists())
+        self.assertIsNone(response.data['id'])
+        self.assertFalse(BotConfig.objects.filter(office=None).exists())
+
+    def test_get_returns_existing_row_unmodified_if_one_already_exists(self):
+        existing = BotConfig.objects.create(office=None, enabled=True)
+        actor = self._superadmin()
+        response = self.client.get('/api/bot/config/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['id'], existing.pk)
+        self.assertTrue(response.data['enabled'])
 
     def test_office_admin_cannot_access_global_config(self):
         actor = self._office_admin('oa', self.office_a)
         response = self.client.get('/api/bot/config/', **self._auth_header(actor))
         self.assertEqual(response.status_code, 403)
 
-    def test_office_admin_can_access_own_office_config(self):
+    def test_office_admin_cannot_access_own_office_config(self):
+        # Bot content is Superadmin/Global Admin only, per explicit
+        # discussion — an Office Admin no longer administers even their
+        # own Office's BotConfig (apps.bot.views._may_access's own
+        # docstring: this is what caused a live bug, a half-configured
+        # per-Office override silently shadowing GLOBAL). The one thing
+        # an Office Admin may still toggle is
+        # apps.offices.models.OfficeInboxConfig.enabled — a different
+        # endpoint entirely, unaffected by this module.
         actor = self._office_admin('oa2', self.office_a)
         response = self.client.get(f'/api/bot/config/?office={self.office_a.pk}', **self._auth_header(actor))
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['office'], self.office_a.pk)
+        self.assertEqual(response.status_code, 403)
 
     def test_office_admin_cannot_access_other_office_config(self):
         actor = self._office_admin('oa3', self.office_a)
@@ -113,13 +134,16 @@ class BotMenuViewTests(BotApiTestCase):
         response = self.client.post('/api/bot/menus/', {'name': 'Main Menu'}, format='json', **self._auth_header(actor))
         self.assertEqual(response.status_code, 403)
 
-    def test_office_admin_can_create_menu_in_own_office(self):
+    def test_office_admin_cannot_create_menu_in_own_office(self):
+        # Was previously allowed — bot content is now Superadmin/Global
+        # Admin only, even for an Office Admin's own Office.
         actor = self._office_admin('oa5', self.office_a)
         response = self.client.post(
             '/api/bot/menus/', {'name': 'Menu Kasongan', 'office': self.office_a.pk}, format='json',
             **self._auth_header(actor),
         )
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(BotMenu.objects.filter(name='Menu Kasongan').exists())
 
     def test_office_admin_cannot_create_menu_in_other_office(self):
         actor = self._office_admin('oa6', self.office_a)

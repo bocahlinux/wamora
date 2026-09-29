@@ -24,9 +24,10 @@ from apps.authn.authentication import JWTAuthentication
 from apps.authn.permissions import HasUserAdministrationScope
 
 from .authorization import has_global_access, is_office_admin_role, is_operator_role
-from .models import Office, OfficeInboxConfig, OfficeMembership, Role
+from .models import Office, OfficeInboxConfig, OfficeMembership, Role, UserProfile
 from .serializers import (
     MembershipUpdateSerializer,
+    MyProfileUpdateSerializer,
     OfficeInboxConfigSerializer,
     OfficeSerializer,
     OperatorAvailabilitySerializer,
@@ -260,7 +261,9 @@ class RoleDetailView(APIView):
 
 
 def _users_queryset():
-    return User.objects.select_related('office_membership', 'office_membership__office', 'office_membership__role')
+    return User.objects.select_related(
+        'office_membership', 'office_membership__office', 'office_membership__role', 'profile',
+    )
 
 
 class UserListCreateView(APIView):
@@ -356,12 +359,20 @@ class UserDetailView(APIView):
 
         profile_serializer = UserProfileUpdateSerializer(data=data, partial=True)
         profile_serializer.is_valid(raise_exception=True)
+        new_initial = None
         for field, value in profile_serializer.validated_data.items():
             if field == 'password':
                 target.set_password(value)
+            elif field == 'initial':
+                # apps.offices.models.UserProfile, not a User field —
+                # applied after target.save() below, via get_or_create
+                # (a user created before UserProfile existed has none yet).
+                new_initial = value
             else:
                 setattr(target, field, value)
         target.save()
+        if new_initial is not None:
+            UserProfile.objects.update_or_create(user=target, defaults={'initial': new_initial})
 
         if has_role and target.is_superuser:
             return _error(
@@ -422,3 +433,59 @@ class OperatorAvailabilityView(APIView):
         membership.is_available = serializer.validated_data['is_available']
         membership.save(update_fields=['is_available', 'updated_at'])
         return Response({'is_available': membership.is_available})
+
+
+def _profile_payload(user):
+    profile = getattr(user, 'profile', None)
+    return {
+        'id': user.pk,
+        'username': user.username,
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'initial': profile.initial if profile else '',
+    }
+
+
+class MyProfileView(APIView):
+    """GET/PATCH /api/auth/me/profile/ — discussed requirement: every
+    role (Superadmin/Global Admin/Office Admin/Operator alike) may view
+    and edit their OWN name/initial/password. Self-service only, same
+    "always request.user's own row, never a target pk" shape as
+    `OperatorAvailabilityView` right above — no admin scope required,
+    just authentication.
+
+    `username` is deliberately never editable here (or anywhere in this
+    API) — it stays the stable identifier `UserCreateSerializer`'s
+    uniqueness/character-set rules were validated against at creation."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(_profile_payload(request.user))
+
+    def patch(self, request):
+        serializer = MyProfileUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        if 'new_password' in data:
+            if not request.user.check_password(data['current_password']):
+                return _error(request, 400, 'invalid_password', 'Your current password is incorrect.')
+            request.user.set_password(data['new_password'])
+
+        if 'first_name' in data:
+            request.user.first_name = data['first_name']
+        if 'last_name' in data:
+            request.user.last_name = data['last_name']
+        request.user.save()
+
+        if 'initial' in data:
+            UserProfile.objects.update_or_create(user=request.user, defaults={'initial': data['initial']})
+
+        AuditLog.objects.create(
+            actor=request.user, action='user.self_update', target=request.user.username,
+            result=AuditLog.RESULT_SUCCESS,
+        )
+        request.user.refresh_from_db()
+        return Response(_profile_payload(request.user))

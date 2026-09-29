@@ -43,6 +43,17 @@ class MeViewTests(APITestCase):
         self.assertEqual(response.data['display_name'], 'Op Erator')
         self.assertFalse(response.data['is_superuser'])
 
+    def test_returns_blank_initial_when_never_set(self):
+        response = self.client.get(ME_URL, **self._auth_header())
+        self.assertEqual(response.data['initial'], '')
+
+    def test_returns_the_users_own_initial(self):
+        from apps.offices.models import UserProfile
+
+        UserProfile.objects.create(user=self.user, initial='OE')
+        response = self.client.get(ME_URL, **self._auth_header())
+        self.assertEqual(response.data['initial'], 'OE')
+
     def test_returns_superuser_identity_flag(self):
         superuser = User.objects.create_superuser('superadmin', 'superadmin@example.com', 'pw')
         token = issue_access_token(superuser)['access_token']
@@ -94,5 +105,8 @@ class MeViewTests(APITestCase):
         # role/is_available — still no password/hash/email/scope/claim data.
         self.assertEqual(
             set(response.data.keys()),
-            {'id', 'username', 'display_name', 'is_superuser', 'has_global_access', 'office', 'role', 'is_available'},
+            {
+                'id', 'username', 'display_name', 'is_superuser', 'has_global_access', 'office', 'role',
+                'is_available', 'initial',
+            },
         )

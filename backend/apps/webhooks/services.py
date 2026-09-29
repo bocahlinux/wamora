@@ -4,7 +4,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.chats.conversation_engine import handle_conversation_message
-from apps.chats.models import Chat, Contact, Message
+from apps.chats.models import Chat, Contact, ConversationSession, Message
 from apps.waha_sessions.models import WahaSession
 from apps.webhooks.models import WebhookEvent
 from apps.webhooks.parsing import (
@@ -138,6 +138,60 @@ def persist_message(session: WahaSession, parsed: ParsedMessage) -> Message:
 
     direction = Message.DIRECTION_OUTBOUND if parsed.from_me else Message.DIRECTION_INBOUND
 
+    # Per-Office Inbox history partitioning (discussed requirement) — the
+    # Office this message belongs to. NOT simply `chat.office`: that
+    # field only changes when a citizen actually picks a NEW Office, so
+    # between two handoff rounds it still holds the PREVIOUS round's
+    # Office — found live: a citizen who re-typed "Menu" and navigated
+    # the bot again (without yet picking any Office) had that entire
+    # pre-handoff exchange mis-tagged to whichever Office they'd picked
+    # LAST time, showing up in that Office's Inbox even though the new
+    # round hadn't been routed anywhere (yet, or ever, if they picked a
+    # DIFFERENT Office this time). Correct source of truth: the Chat's
+    # currently ACTIVE `ConversationSession.office` (apps.chats.models —
+    # starts `None` on every fresh session, only set once a real Office
+    # selection happens WITHIN that same round):
+    #   - an active session exists -> its own `.office` (None until this
+    #     round's citizen actually picks one — exactly "pre-handoff, not
+    #     yet routed anywhere", never a stale carry-over).
+    #   - no active session, and this is an OUTBOUND (bot-generated)
+    #     message -> the most recently created session's `.office`,
+    #     WHATEVER its current state — found live: the bot's own closing
+    #     confirmation ("✅ Permintaan Anda telah selesai...",
+    #     apps.chats.conversation_engine.close_waiting_session/
+    #     expire_waiting_operator_session/_handle_menu_item's completion
+    #     paths) always completes the session FIRST, then sends — so by
+    #     the time this self-sent message is reconciled, its own session
+    #     is already COMPLETED and would otherwise fall through to the
+    #     `None` branch below, incorrectly banishing the citizen's own
+    #     "you're done" confirmation out of the Office they were just
+    #     routed to. Safe specifically for OUTBOUND: the bot never speaks
+    #     first into a not-yet-started round (only a citizen's INBOUND
+    #     message can be that), so an outbound message with no active
+    #     session is always the tail end of the round that JUST ended,
+    #     never pre-handoff chatter of one that hasn't started yet.
+    #   - no active session, and this is an INBOUND (citizen) message, but
+    #     this Chat has had a session before -> `None` (between rounds —
+    #     never fall back to the stale `chat.office`; this is the
+    #     "re-typed Menu, hasn't picked an Office yet this round" case).
+    #   - this Chat has NEVER had a ConversationSession at all -> fall
+    #     back to `chat.office` (a Chat the bot has never engaged with —
+    #     e.g. a WahaSession-level static Office mapping predating the
+    #     Bot Engine — where `chat.office` is a legitimate, stable value,
+    #     not a leftover from a previous bot round).
+    active_session = ConversationSession.objects.filter(
+        chat=chat, state__in=ConversationSession.ACTIVE_STATES,
+    ).only('office_id').first()
+    if active_session is not None:
+        message_office_id = active_session.office_id
+    elif direction == Message.DIRECTION_OUTBOUND:
+        latest_session = ConversationSession.objects.filter(chat=chat).order_by('-id').only('office_id').first()
+        message_office_id = latest_session.office_id if latest_session is not None else chat.office_id
+    elif ConversationSession.objects.filter(chat=chat).exists():
+        message_office_id = None
+    else:
+        message_office_id = chat.office_id
+
     try:
         message = Message.objects.create(
             session=session,
@@ -147,6 +201,8 @@ def persist_message(session: WahaSession, parsed: ParsedMessage) -> Message:
             message_type=parsed.message_type,
             body=parsed.body,
             timestamp=parsed.timestamp,
+            office_id=message_office_id,
+            list_reply_id=parsed.list_reply_row_id or '',
         )
     except IntegrityError:
         raise DuplicateMessage(parsed.provider_message_id)

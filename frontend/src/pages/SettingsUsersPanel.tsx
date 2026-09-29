@@ -189,6 +189,7 @@ function UserForm({
   const [password, setPassword] = useState('');
   const [firstName, setFirstName] = useState(editing?.first_name ?? '');
   const [lastName, setLastName] = useState(editing?.last_name ?? '');
+  const [initial, setInitial] = useState(editing?.initial ?? '');
   const [isActive, setIsActive] = useState(editing?.is_active ?? true);
   // Roles this actor may pick from at all — an Office Admin may never
   // select one with `grants_global_access` (server-enforced regardless;
@@ -213,6 +214,10 @@ function UserForm({
       setError({ kind: 'validation', message: 'An Office is required for this Role.' });
       return;
     }
+    if (isNew && !initial.trim()) {
+      setError({ kind: 'validation', message: 'An Initial is required.' });
+      return;
+    }
     setBusy(true);
     setError(null);
 
@@ -222,6 +227,7 @@ function UserForm({
         password,
         first_name: firstName.trim(),
         last_name: lastName.trim(),
+        initial: initial.trim(),
         role: roleId,
         office: officeRequired ? (officeId === '' ? undefined : officeId) : null,
       });
@@ -238,6 +244,7 @@ function UserForm({
       first_name: firstName.trim(),
       last_name: lastName.trim(),
       is_active: isActive,
+      ...(initial.trim() ? { initial: initial.trim() } : {}),
       ...(password ? { password } : {}),
       role: roleId,
       office: officeRequired ? (officeId === '' ? null : officeId) : null,
@@ -264,6 +271,13 @@ function UserForm({
       />
       <Input label="First name" value={firstName} onChange={(e) => setFirstName(e.target.value)} disabled={busy} />
       <Input label="Last name" value={lastName} onChange={(e) => setLastName(e.target.value)} disabled={busy} />
+      <Input
+        label="Initial (shown to citizens when this user claims a chat)"
+        value={initial}
+        onChange={(e) => setInitial(e.target.value)}
+        disabled={busy}
+        maxLength={10}
+      />
 
       {!isNew ? (
         <label className="wa-settings-checkbox-row">

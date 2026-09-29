@@ -13,17 +13,24 @@ import type { ApiError, ApiResult } from '../lib/api';
 import { sendMessage } from '../lib/bffApi';
 import {
   assignChat,
+  claimChat,
+  closeChatSession,
   getChatMessages,
   getChatOperators,
   getChats,
   getMe,
+  getOffices,
   getSyncStatus,
+  getUsers,
   markChatRead,
   recoverSyncCheckpoint,
+  transferChat,
   unassignChat,
   updateOperatorAvailability,
+  type AdminUser,
   type ChatMessage,
   type ChatSummary,
+  type Office,
   type OperatorCandidate,
   type SyncStatus,
 } from '../lib/djangoApi';
@@ -273,6 +280,27 @@ export function InboxPage() {
     setChats((prev) => (prev ? prev.map((c) => (c.id === chatId ? { ...c, assigned_to: assignedTo } : c)) : prev));
   }
 
+  // ---- "Ambil" (self-claim) — discussed requirement: replying requires
+  // claiming an unassigned chat first, not just belonging to the right
+  // Office. Right here in the conversation header, not only on the
+  // Dashboard's Pending queue, since the Office Admin/Operator may well
+  // already have the chat open when they realize it isn't claimed yet.
+  const [claimBusy, setClaimBusy] = useState(false);
+  const [claimFeedback, setClaimFeedback] = useState<{ kind: 'error'; error: ApiError } | null>(null);
+
+  async function handleClaimFromInbox() {
+    if (!selectedChat || claimBusy) return;
+    setClaimBusy(true);
+    setClaimFeedback(null);
+    const result = await claimChat(selectedChat.id);
+    setClaimBusy(false);
+    if (!result.ok) {
+      setClaimFeedback({ kind: 'error', error: result.error });
+      return;
+    }
+    applyAssignedTo(selectedChat.id, result.data.assigned_to);
+  }
+
   async function openAssignModal() {
     if (!selectedChat) return;
     setAssignModalOpen(true);
@@ -303,6 +331,71 @@ export function InboxPage() {
     setAssignBusy(false);
     if (!result.ok) return;
     applyAssignedTo(selectedChat.id, null);
+  }
+
+  // ---- Cross-Office transfer (discussed requirement) — Superadmin/
+  // Global Admin only; backend (has_global_access check in
+  // ChatTransferView) remains the sole authority, hasGlobalAccess here
+  // only decides whether to SHOW the control. Deliberately independent
+  // of canManageAssignment (which also includes Office Admin — this
+  // action must not).
+  const hasGlobalAccess = meQuery.status === 'success' && meQuery.data.has_global_access;
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
+  const [officesState, setOfficesState] = useState<
+    { status: 'loading' } | { status: 'success'; data: Office[] } | { status: 'error'; error: ApiError } | null
+  >(null);
+  const [usersState, setUsersState] = useState<
+    { status: 'loading' } | { status: 'success'; data: AdminUser[] } | { status: 'error'; error: ApiError } | null
+  >(null);
+  const [transferOfficeId, setTransferOfficeId] = useState<number | ''>('');
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferFeedback, setTransferFeedback] = useState<{ kind: 'error'; error: ApiError } | null>(null);
+
+  async function openTransferModal() {
+    if (!selectedChat) return;
+    setTransferModalOpen(true);
+    setTransferFeedback(null);
+    setTransferOfficeId('');
+    setOfficesState({ status: 'loading' });
+    setUsersState({ status: 'loading' });
+    const [officesResult, usersResult] = await Promise.all([getOffices(), getUsers()]);
+    setOfficesState(officesResult.ok ? { status: 'success', data: officesResult.data } : { status: 'error', error: officesResult.error });
+    setUsersState(usersResult.ok ? { status: 'success', data: usersResult.data } : { status: 'error', error: usersResult.error });
+  }
+
+  async function handleTransfer(userId: number) {
+    if (!selectedChat || transferOfficeId === '' || transferBusy) return;
+    setTransferBusy(true);
+    setTransferFeedback(null);
+    const result = await transferChat(selectedChat.id, transferOfficeId, userId);
+    setTransferBusy(false);
+    if (!result.ok) {
+      setTransferFeedback({ kind: 'error', error: result.error });
+      return;
+    }
+    applyAssignedTo(selectedChat.id, result.data.assigned_to);
+    setTransferModalOpen(false);
+  }
+
+  // ---- Bot Conversation Engine — manual "close session" (operator's own
+  // counterpart to the 24h auto-expiry, apps.chats.tasks). Only shown
+  // when the selected chat is actually waiting_for_operator. -------------
+  const [closeSessionBusy, setCloseSessionBusy] = useState(false);
+  const [closeSessionFeedback, setCloseSessionFeedback] = useState<{ kind: 'error'; error: ApiError } | null>(null);
+
+  async function handleCloseSession() {
+    if (!selectedChat || closeSessionBusy) return;
+    setCloseSessionBusy(true);
+    setCloseSessionFeedback(null);
+    const result = await closeChatSession(selectedChat.id);
+    setCloseSessionBusy(false);
+    if (!result.ok) {
+      setCloseSessionFeedback({ kind: 'error', error: result.error });
+      return;
+    }
+    setChats((prev) =>
+      prev ? prev.map((c) => (c.id === selectedChat.id ? { ...c, waiting_for_operator: false } : c)) : prev,
+    );
   }
 
   // ---- Self availability toggle (Step 14) — only for an actual Operator ---
@@ -353,10 +446,18 @@ export function InboxPage() {
   const [messages, setMessages] = useState<ChatMessage[] | null>(null);
   const [nextPage, setNextPage] = useState<number | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Discussed requirement — auto-scroll to the newest message whenever a
+  // chat is selected, or a genuinely NEW message arrives (poll merge
+  // prepends at index 0 — mergeNewestFirst's own comment). Deliberately
+  // NOT triggered by handleLoadOlder (appends at the END, index 0
+  // unchanged) — jumping the viewport to the bottom while someone is
+  // reading older history would defeat the point of loading it.
+  const latestMessageIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     setMessages(null);
     setNextPage(null);
+    latestMessageIdRef.current = null;
   }, [selectedChatId]);
 
   useEffect(() => {
@@ -413,12 +514,44 @@ export function InboxPage() {
   const [sendBusy, setSendBusy] = useState(false);
   const [sendFeedback, setSendFeedback] = useState<SendFeedback | null>(null);
 
+  // Discussed requirement — a chat can only be replied to directly
+  // while: (1) the citizen is actively waiting for an operator (chose
+  // "Chat dengan Operator" and hasn't been closed/expired yet), (2) it's
+  // still this viewer's Office to manage (can_manage — see
+  // ChatMessagesOfficePartitionTests/can_manage_chat for why this can't
+  // just be waiting_for_operator alone), AND (3) the viewer has actually
+  // CLAIMED it (assigned_to === me) — found live: an Office Admin/
+  // Operator could reply to a chat nobody had "Ambil"-ed yet, just
+  // because it belonged to their Office. Applies to every role (Global
+  // Admin/Office Admin/Operator alike, no exception — an unclaimed chat
+  // must be claimed via ChatClaimView/"Ambil" first, same as everyone
+  // else). This is a frontend-level gate only — sending itself still
+  // goes straight Frontend -> BFF -> WAHA (unchanged), so it does not by
+  // itself stop a direct API call; it matches this project's existing
+  // trust model for that path (the BFF already trusts an authenticated
+  // frontend caller for sendText).
+  const canSendMessage = Boolean(
+    selectedChat?.waiting_for_operator
+    && selectedChat?.can_manage
+    && meQuery.status === 'success'
+    && selectedChat?.assigned_to?.id === meQuery.data.id,
+  );
+
   async function handleSend() {
     const text = draftText.trim();
-    if (!text || !selectedChat || !sessionName || sendBusy) return;
+    if (!text || !selectedChat || !sessionName || sendBusy || !canSendMessage) return;
     setSendBusy(true);
     setSendFeedback(null);
-    const result = await sendMessage(sessionName, selectedChat.provider_chat_id, text, crypto.randomUUID());
+    // Discussed requirement — every manually-typed reply is signed with
+    // the sender's own initial (apps.offices.models.UserProfile, via
+    // GET /api/auth/me/'s own `initial` field), the same "_~ {initial}_"
+    // convention the one-time claim notification already uses
+    // (apps.chats.assignment.claim_chat) — WhatsApp italics (_..._), '~'
+    // a plain visual marker, not markup. Blank if the sender never set
+    // one — never a fabricated placeholder.
+    const myInitial = meQuery.status === 'success' ? meQuery.data.initial : '';
+    const outgoingText = myInitial ? `${text}\n\n_~ ${myInitial}_` : text;
+    const result = await sendMessage(sessionName, selectedChat.provider_chat_id, outgoingText, crypto.randomUUID());
     setSendBusy(false);
     if (!result.ok) {
       setSendFeedback({ kind: 'error', error: result.error });
@@ -438,6 +571,20 @@ export function InboxPage() {
   }
 
   const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!messages || messages.length === 0) return;
+    const newestId = messages[0].id;
+    if (newestId === latestMessageIdRef.current) return;
+    latestMessageIdRef.current = newestId;
+    // Deferred one frame — the new message bubble must actually be
+    // painted first, otherwise scrollHeight still reflects the
+    // pre-update layout.
+    requestAnimationFrame(() => {
+      const el = listRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }, [messages]);
 
   return (
     <div className="wa-inbox">
@@ -579,15 +726,28 @@ export function InboxPage() {
                     ) : null}
                   </span>
                   {/* Step 14 (Operator assignment foundation) — backend
-                      (HasOfficeAdminAccess + can_view_chat) remains sole
-                      authority; canManageAssignment only decides display. */}
+                      (HasOfficeAdminAccess + can_manage_chat) remains sole
+                      authority; the conditions below only decide display.
+                      Gated on waiting_for_operator too (found live —
+                      Assign/Reassign stayed clickable after the session
+                      was already closed, offering a control with nothing
+                      meaningful left to assign) and can_manage (false for
+                      a Chat whose Office has since moved elsewhere — the
+                      button was shown but every click 403'd; now hidden
+                      instead of offering a control that always fails). */}
                   <span className="wa-inbox__assignment">
                     <span className="wa-inbox__assignment-label">
                       {selectedChat.assigned_to
                         ? `Assigned: ${selectedChat.assigned_to.first_name || selectedChat.assigned_to.username}`
                         : 'Unassigned'}
                     </span>
-                    {canManageAssignment ? (
+                    {selectedChat.waiting_for_operator && selectedChat.can_manage && !selectedChat.assigned_to
+                    && (canManageAssignment || isOperator) ? (
+                      <Button variant="primary" disabled={claimBusy} onClick={handleClaimFromInbox}>
+                        {claimBusy ? 'Mengambil…' : 'Ambil'}
+                      </Button>
+                    ) : null}
+                    {selectedChat.waiting_for_operator && canManageAssignment && selectedChat.can_manage ? (
                       <>
                         <Button variant="secondary" onClick={openAssignModal}>
                           {selectedChat.assigned_to ? 'Reassign' : 'Assign'}
@@ -599,7 +759,26 @@ export function InboxPage() {
                         ) : null}
                       </>
                     ) : null}
+                    {hasGlobalAccess && selectedChat.waiting_for_operator ? (
+                      <Button variant="ghost" onClick={openTransferModal}>
+                        Transfer
+                      </Button>
+                    ) : null}
                   </span>
+                  {claimFeedback?.kind === 'error' ? <ErrorState error={claimFeedback.error} /> : null}
+                  {/* Conversation/Bot Engine — only shown while this chat
+                      is actually handed off to a human operator AND still
+                      manageable by the viewer; backend (HasOfficeAccess +
+                      can_manage_chat) remains sole authority. */}
+                  {selectedChat.waiting_for_operator && selectedChat.can_manage && (canManageAssignment || isOperator) ? (
+                    <span className="wa-inbox__assignment">
+                      <span className="wa-inbox__assignment-label">Waiting for operator</span>
+                      <Button variant="secondary" disabled={closeSessionBusy} onClick={handleCloseSession}>
+                        {closeSessionBusy ? 'Closing…' : 'Tutup Sesi Bot'}
+                      </Button>
+                    </span>
+                  ) : null}
+                  {closeSessionFeedback ? <ErrorState error={closeSessionFeedback.error} /> : null}
                 </div>
 
                 <div className="wa-inbox__messages" ref={listRef}>
@@ -644,18 +823,28 @@ export function InboxPage() {
                 <div className="wa-inbox__composer">
                   <textarea
                     className="wa-inbox__composer-input"
-                    placeholder="Type a message…"
+                    placeholder={canSendMessage ? 'Type a message…' : 'Menunggu wajib pajak memilih "Chat dengan Operator"…'}
                     value={draftText}
                     onChange={(e) => setDraftText(e.target.value)}
-                    disabled={sendBusy}
+                    disabled={sendBusy || !canSendMessage}
                     rows={2}
                   />
-                  <Button variant="primary" onClick={handleSend} disabled={sendBusy || !draftText.trim()}>
+                  <Button variant="primary" onClick={handleSend} disabled={sendBusy || !draftText.trim() || !canSendMessage}>
                     <Send size={16} strokeWidth={1.75} aria-hidden="true" />
                     {sendBusy ? 'Sending…' : 'Send'}
                   </Button>
                 </div>
-                {sendFeedback?.kind === 'error' ? (
+                {!canSendMessage ? (
+                  <p className="wa-inbox__send-unknown" role="status">
+                    {selectedChat.waiting_for_operator && !selectedChat.can_manage
+                      ? 'Percakapan ini sekarang ditangani Office lain — Anda hanya melihat histori lama Anda di sini, tidak bisa membalas.'
+                      : selectedChat.waiting_for_operator && selectedChat.can_manage && !selectedChat.assigned_to
+                        ? 'Percakapan ini belum diambil — klik "Ambil" di Dashboard, atau minta Admin meng-assign-kan, sebelum bisa membalas.'
+                        : selectedChat.waiting_for_operator && selectedChat.can_manage && selectedChat.assigned_to
+                          ? `Percakapan ini sudah diambil oleh ${selectedChat.assigned_to.first_name || selectedChat.assigned_to.username} — hanya mereka yang bisa membalas.`
+                          : 'Percakapan ini belum/tidak sedang menunggu operator — Anda hanya bisa membalas langsung saat wajib pajak memilih "Chat dengan Operator". Sesi yang sudah selesai tidak bisa dibalas sampai wajib pajak memulai lagi.'}
+                  </p>
+                ) : sendFeedback?.kind === 'error' ? (
                   <ErrorState error={sendFeedback.error} />
                 ) : sendFeedback?.kind === 'unknown' ? (
                   <p className="wa-inbox__send-unknown" role="status">
@@ -697,6 +886,68 @@ export function InboxPage() {
           </ul>
         )}
         {assignFeedback?.kind === 'error' ? <ErrorState error={assignFeedback.error} /> : null}
+      </Modal>
+
+      <Modal open={transferModalOpen} onClose={() => setTransferModalOpen(false)} title="Transfer to another Office">
+        {officesState === null || officesState.status === 'loading' || usersState === null || usersState.status === 'loading' ? (
+          <LoadingState label="Loading offices and users…" />
+        ) : officesState.status === 'error' ? (
+          <ErrorState error={officesState.error} />
+        ) : usersState.status === 'error' ? (
+          <ErrorState error={usersState.error} />
+        ) : (
+          <>
+            <div className="wa-settings-form__field">
+              <label className="wa-settings-form__label" htmlFor="transfer-office">
+                Destination Office
+              </label>
+              <select
+                id="transfer-office"
+                className="wa-settings-form__select"
+                value={transferOfficeId}
+                onChange={(e) => setTransferOfficeId(e.target.value ? Number(e.target.value) : '')}
+              >
+                <option value="">Select an Office…</option>
+                {officesState.data.map((office) => (
+                  <option key={office.id} value={office.id}>
+                    {office.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {transferOfficeId === '' ? null : (
+              (() => {
+                const candidates = usersState.data.filter(
+                  (u) => u.office?.id === transferOfficeId && (u.role?.is_operator || u.role?.is_office_admin),
+                );
+                return candidates.length === 0 ? (
+                  <EmptyState
+                    icon={Users}
+                    title="No eligible users"
+                    description="This Office has no Operator or Office Admin to transfer to."
+                  />
+                ) : (
+                  <ul className="wa-inbox__operator-list">
+                    {candidates.map((u) => (
+                      <li key={u.id}>
+                        <Button
+                          variant="secondary"
+                          disabled={transferBusy}
+                          onClick={() => handleTransfer(u.id)}
+                          className="wa-inbox__operator-option"
+                        >
+                          {[u.first_name, u.last_name].filter(Boolean).join(' ') || u.username}
+                          {u.role?.is_office_admin ? ' (Office Admin)' : ''}
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                );
+              })()
+            )}
+          </>
+        )}
+        {transferFeedback?.kind === 'error' ? <ErrorState error={transferFeedback.error} /> : null}
       </Modal>
     </div>
   );

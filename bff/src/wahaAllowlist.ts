@@ -17,7 +17,8 @@ export type WahaEndpointName =
   | 'logoutSession'
   | 'getQr'
   | 'requestPairingCode'
-  | 'sendText';
+  | 'sendText'
+  | 'sendList';
 
 interface WahaEndpointDef {
   method: 'GET' | 'POST';
@@ -35,4 +36,10 @@ export const WAHA_ALLOWED_ENDPOINTS: Record<WahaEndpointName, WahaEndpointDef> =
   getQr: { method: 'GET', path: (s) => `/api/${enc(s)}/auth/qr` },
   requestPairingCode: { method: 'POST', path: (s) => `/api/${enc(s)}/auth/request-code` },
   sendText: { method: 'POST', path: () => '/api/sendText' },
+  // Discussed requirement — Conversation/Bot Engine interactive list
+  // menus. Live-verified by the project operator directly against this
+  // exact WAHA deployment (GOWS engine) before this endpoint was added
+  // to the allowlist — never assumed from WAHA's general documentation
+  // alone (this project's standing evidence-based rule).
+  sendList: { method: 'POST', path: () => '/api/sendList' },
 };

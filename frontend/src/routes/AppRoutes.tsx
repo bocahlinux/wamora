@@ -7,6 +7,7 @@ import { DashboardPage } from '../pages/DashboardPage';
 import { InboxPage } from '../pages/InboxPage';
 import { LoginPage } from '../pages/LoginPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
+import { ProfilePage } from '../pages/ProfilePage';
 import { ReportsPage } from '../pages/ReportsPage';
 import { SessionsPage } from '../pages/SessionsPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -89,6 +90,14 @@ export function AppRoutes() {
         element={
           <ProtectedRoute>
             <SettingsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/profile"
+        element={
+          <ProtectedRoute>
+            <ProfilePage />
           </ProtectedRoute>
         }
       />

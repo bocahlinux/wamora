@@ -80,6 +80,28 @@ class SelectOfficeForChatTests(TestCase):
         self.assertIsNone(error)
         self.assertEqual(chat.office, office)
 
+    def test_selecting_an_office_clears_any_previous_assignment(self):
+        # Regression: found live — a new handoff round left the PREVIOUS
+        # round's assignee in place, hiding the Chat from
+        # apps.dashboard.views.PendingChatsView's assigned_to__isnull=True
+        # queue entirely, so nobody at the newly-selected Office was ever
+        # notified.
+        from django.contrib.auth.models import User
+
+        from apps.chats.models import Chat
+
+        office = Office.objects.create(name='Office C')
+        OfficeInboxConfig.objects.create(office=office, enabled=True)
+        previous_assignee = User.objects.create_user('previous_operator', password='pw')
+        chat = Chat.objects.create(session=self.session, provider_chat_id='wp3@lid', assigned_to=previous_assignee)
+
+        updated_chat, error = select_office_for_chat(self.session, 'wp3@lid', office.pk)
+
+        self.assertIsNone(error)
+        self.assertIsNone(updated_chat.assigned_to)
+        chat.refresh_from_db()
+        self.assertIsNone(chat.assigned_to)
+
     def test_disabled_office_is_rejected(self):
         office = Office.objects.create(name='Office B')
         OfficeInboxConfig.objects.create(office=office, enabled=False)

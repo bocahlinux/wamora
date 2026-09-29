@@ -4,7 +4,12 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.bot.models import BotConfig, BotMenu, BotMenuItem, BotTrigger
-from apps.chats.conversation_engine import HANDOFF_ACK_TEXT, handle_conversation_message
+from apps.chats.conversation_engine import (
+    HANDOFF_ACK_TEXT,
+    close_waiting_session,
+    expire_waiting_operator_session,
+    handle_conversation_message,
+)
 from apps.chats.models import Chat, ConversationSession, Message
 from apps.offices.models import Office, OfficeInboxConfig
 from apps.waha_sessions.models import WahaSession
@@ -32,14 +37,18 @@ class ConversationEngineTestCase(TestCase):
     def _chat(self, provider_chat_id='wp1@lid', **kwargs):
         return Chat.objects.create(session=self.session, provider_chat_id=provider_chat_id, **kwargs)
 
-    def _inbound(self, chat, body, provider_message_id='m1'):
+    def _inbound(self, chat, body, provider_message_id='m1', list_reply_id=''):
         return Message.objects.create(
             session=self.session, chat=chat, provider_message_id=provider_message_id,
             direction=Message.DIRECTION_INBOUND, message_type='text', body=body, timestamp=timezone.now(),
+            list_reply_id=list_reply_id,
         )
 
     def _sent_text(self, mocked_send, call_index=0):
         return mocked_send.call_args_list[call_index][0][2]
+
+    def _sent_list(self, mocked_send_list, call_index=0):
+        return mocked_send_list.call_args_list[call_index][0][2]
 
     @mock.patch('apps.chats.conversation_engine.send_blast_message')
     def test_bot_disabled_globally_is_a_silent_noop(self, mocked_send):
@@ -177,6 +186,40 @@ class ConversationEngineTestCase(TestCase):
         self.assertNotIn('Samsat Disabled', text)
 
     @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_office_selector_numbers_by_display_position_not_raw_pk(self, mocked_send):
+        # Regression: found live — offices are numbered by their raw
+        # database pk, which rarely matches their alphabetically-ordered
+        # display position (e.g. "2. Samsat Kasongan / 1. Samsat Palangka
+        # Raya / 3. Samsat Sampit"), confusing a citizen replying with a
+        # number. Create Palangka Raya first (so its pk is LOWER than
+        # Kasongan's) to force the same mismatch, and confirm the citizen
+        # replying "1" reaches Kasongan (the first office shown), not
+        # whichever office happens to have pk=1.
+        office_palangka_raya = Office.objects.create(name='Samsat Palangka Raya')
+        office_kasongan = Office.objects.create(name='Samsat Kasongan')
+        self.assertLess(office_palangka_raya.pk, office_kasongan.pk)
+        OfficeInboxConfig.objects.create(office=office_palangka_raya, enabled=True)
+        OfficeInboxConfig.objects.create(office=office_kasongan, enabled=True)
+        selector_menu = BotMenu.objects.create(name='Pilih Office', is_office_selector=True)
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Hubungi Petugas', trigger_value='4',
+            action_type=BotMenuItem.ACTION_SHOW_MENU, target_menu=selector_menu,
+        )
+        chat = self._chat()
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+        mocked_send.reset_mock()
+        handle_conversation_message(self.session, self._inbound(chat, '4', 'm2'))
+        menu_text = self._sent_text(mocked_send)
+        self.assertIn('1. Samsat Kasongan', menu_text)
+        self.assertIn('2. Samsat Palangka Raya', menu_text)
+        mocked_send.reset_mock()
+
+        handle_conversation_message(self.session, self._inbound(chat, '1', 'm3'))
+
+        chat.refresh_from_db()
+        self.assertEqual(chat.office, office_kasongan)
+
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
     def test_office_selection_syncs_session_office_and_chat_office(self, mocked_send):
         office_a = Office.objects.create(name='Samsat A')
         OfficeInboxConfig.objects.create(office=office_a, enabled=True)
@@ -189,7 +232,11 @@ class ConversationEngineTestCase(TestCase):
         handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
         handle_conversation_message(self.session, self._inbound(chat, '4', 'm2'))
 
-        handle_conversation_message(self.session, self._inbound(chat, str(office_a.pk), 'm3'))
+        # Reply by DISPLAY POSITION ("1" — the only office shown), never
+        # by raw pk (office_a.pk may not be 1 — see
+        # _render_office_selector_text's own docstring for the live bug
+        # this regression-guards).
+        handle_conversation_message(self.session, self._inbound(chat, '1', 'm3'))
 
         chat.refresh_from_db()
         self.assertEqual(chat.office, office_a)
@@ -221,6 +268,24 @@ class ConversationEngineTestCase(TestCase):
         )
         handle_conversation_message(self.session, self._inbound(chat, 'halo petugas'))
         mocked_send.assert_not_called()
+
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_global_trigger_keyword_while_waiting_operator_does_not_reset_session(self, mocked_send):
+        # Regression: found live — sending the "halo" trigger keyword
+        # while WAITING_OPERATOR was resetting the flow and re-showing
+        # the Main Menu, silently pulling the citizen back out of an
+        # active handoff before an operator ever replied. The
+        # WAITING_OPERATOR immunity must win over trigger matching,
+        # regardless of the message body.
+        chat = self._chat()
+        waiting_session = ConversationSession.objects.create(
+            chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR, current_menu=None,
+        )
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo'))
+        mocked_send.assert_not_called()
+        self.assertEqual(ConversationSession.objects.filter(chat=chat).count(), 1)
+        waiting_session.refresh_from_db()
+        self.assertEqual(waiting_session.state, ConversationSession.STATE_WAITING_OPERATOR)
 
     @mock.patch('apps.chats.conversation_engine.send_blast_message')
     def test_disabled_menu_item_is_treated_as_unrecognized(self, mocked_send):
@@ -290,6 +355,46 @@ class ConversationEngineTestCase(TestCase):
         self.assertEqual(mocked_send.call_count, 1)
 
     @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_close_waiting_session_completes_and_sends_completion_message(self, mocked_send):
+        chat = self._chat()
+        session = ConversationSession.objects.create(
+            chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR, current_menu=None,
+        )
+
+        closed = close_waiting_session(chat)
+
+        self.assertEqual(closed.pk, session.pk)
+        session.refresh_from_db()
+        self.assertEqual(session.state, ConversationSession.STATE_COMPLETED)
+        self.assertIsNotNone(session.completed_at)
+        self.assertIn('Terima kasih', self._sent_text(mocked_send))
+
+        # The bot must answer the citizen's next message again afterward.
+        mocked_send.reset_mock()
+        handle_conversation_message(self.session, self._inbound(chat, 'apa kabar'))
+        mocked_send.assert_called_once()
+
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_close_waiting_session_returns_none_when_nothing_to_close(self, mocked_send):
+        chat = self._chat()
+        self.assertIsNone(close_waiting_session(chat))
+        mocked_send.assert_not_called()
+
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_expire_waiting_operator_session_completes_and_sends_completion_message(self, mocked_send):
+        chat = self._chat()
+        session = ConversationSession.objects.create(
+            chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR, current_menu=None,
+        )
+
+        expire_waiting_operator_session(session)
+
+        session.refresh_from_db()
+        self.assertEqual(session.state, ConversationSession.STATE_COMPLETED)
+        self.assertIsNotNone(session.completed_at)
+        self.assertIn('Terima kasih', self._sent_text(mocked_send))
+
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
     def test_reconciliation_style_direct_call_is_never_made_reconciliation_never_imports_this(self, mocked_send):
         # Structural guarantee, not a runtime one: apps.sync.reconciliation
         # calls persist_message() directly and never imports
@@ -299,3 +404,150 @@ class ConversationEngineTestCase(TestCase):
         with open(source, encoding='utf-8') as fh:
             contents = fh.read()
         self.assertNotIn('conversation_engine', contents)
+
+
+class ListMenuTestCase(ConversationEngineTestCase):
+    """Discussed requirement — Conversation/Bot Engine interactive list
+    menus (WAHA's `sendList`). Mocks `send_list_message` directly (not
+    `send_blast_message`) so these tests observe the actual LIST payload,
+    rather than the text fallback `_send_list` triggers when the list
+    call fails — that fallback path is what every OTHER test in this
+    file already exercises (send_list_message unmocked -> BffDispatchError
+    -> falls back to the mocked send_blast_message), proving the
+    fallback itself works."""
+
+    @mock.patch('apps.chats.conversation_engine.send_list_message', return_value={'status': 'sent', 'provider_message_id': None})
+    def test_new_session_menu_is_sent_as_a_list(self, mocked_send_list):
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Info jam operasional', trigger_value='9',
+            action_type=BotMenuItem.ACTION_SEND_TEXT, text='Kami buka Senin-Jumat.',
+        )
+        chat = self._chat()
+
+        handle_conversation_message(self.session, self._inbound(chat, 'apa kabar'))
+
+        mocked_send_list.assert_called_once()
+        payload = self._sent_list(mocked_send_list)
+        self.assertEqual(payload['title'], 'Main Menu')
+        rows = payload['sections'][0]['rows']
+        self.assertEqual(rows, [{'title': 'Info jam operasional', 'rowId': '9', 'description': None}])
+
+    @mock.patch('apps.chats.conversation_engine.send_list_message', return_value={'status': 'sent', 'provider_message_id': None})
+    def test_tapping_a_list_row_matches_by_rowid_not_label_text(self, mocked_send_list):
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Info jam operasional', trigger_value='9',
+            action_type=BotMenuItem.ACTION_SEND_TEXT, text='Kami buka Senin-Jumat.',
+        )
+        chat = self._chat()
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+        mocked_send_list.reset_mock()
+
+        # A real list tap: body is the row's TITLE text (WAHA's own
+        # confirmed behavior), but list_reply_id carries the stable
+        # rowId ("9") — matching must use the id, not the label text.
+        handle_conversation_message(
+            self.session, self._inbound(chat, 'Info jam operasional', 'm2', list_reply_id='9'),
+        )
+
+        session = ConversationSession.objects.get(chat=chat)
+        self.assertEqual(session.state, ConversationSession.STATE_COMPLETED)
+
+    @mock.patch('apps.chats.conversation_engine.send_list_message', return_value={'status': 'sent', 'provider_message_id': None})
+    def test_manually_typed_reply_still_matches_by_trigger_value(self, mocked_send_list):
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Info jam operasional', trigger_value='9',
+            action_type=BotMenuItem.ACTION_COMPLETE_SESSION,
+        )
+        chat = self._chat()
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+
+        # No list_reply_id — an old client that can't render lists, or a
+        # citizen typing out of habit.
+        handle_conversation_message(self.session, self._inbound(chat, '9', 'm2'))
+
+        session = ConversationSession.objects.get(chat=chat)
+        self.assertEqual(session.state, ConversationSession.STATE_COMPLETED)
+
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    @mock.patch('apps.chats.conversation_engine.send_list_message', return_value={'status': 'sent', 'provider_message_id': None})
+    def test_menu_with_more_than_ten_items_falls_back_to_text(self, mocked_send_list, mocked_send_text):
+        for i in range(11):
+            BotMenuItem.objects.create(
+                menu=self.root_menu, label=f'Item {i}', trigger_value=str(i),
+                action_type=BotMenuItem.ACTION_COMPLETE_SESSION,
+            )
+        chat = self._chat()
+
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo'))
+
+        mocked_send_list.assert_not_called()
+        mocked_send_text.assert_called_once()
+        self.assertIn('Item 0', self._sent_text(mocked_send_text))
+
+    @mock.patch('apps.chats.conversation_engine.send_list_message', return_value={'status': 'sent', 'provider_message_id': None})
+    def test_office_selector_paginates_at_seven_offices_per_page(self, mocked_send_list):
+        offices = [Office.objects.create(name=f'Samsat {i:02d}') for i in range(9)]
+        for office in offices:
+            OfficeInboxConfig.objects.create(office=office, enabled=True)
+        selector_menu = BotMenu.objects.create(name='Pilih Office', is_office_selector=True)
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Hubungi Petugas', trigger_value='4',
+            action_type=BotMenuItem.ACTION_SHOW_MENU, target_menu=selector_menu,
+        )
+        chat = self._chat()
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+        mocked_send_list.reset_mock()
+
+        handle_conversation_message(self.session, self._inbound(chat, '4', 'm2'))
+
+        payload = self._sent_list(mocked_send_list)
+        rows = payload['sections'][0]['rows']
+        # 9 offices, sorted by name -> page 1 = first 7 + "Lainnya" (no
+        # "Sebelumnya", this IS page 1).
+        self.assertEqual(len(rows), 8)
+        self.assertEqual([r['title'] for r in rows[:7]], [o.name for o in offices[:7]])
+        self.assertEqual(rows[7]['title'], '▶️ Samsat Lainnya')
+        self.assertEqual(rows[7]['rowId'], '__page_2')
+
+        mocked_send_list.reset_mock()
+        # Tap "Samsat Lainnya" — page navigation, session/current_menu
+        # must stay completely untouched (still on the office selector).
+        session_before = ConversationSession.objects.get(chat=chat)
+        handle_conversation_message(
+            self.session, self._inbound(chat, '▶️ Samsat Lainnya', 'm3', list_reply_id='__page_2'),
+        )
+        session_after = ConversationSession.objects.get(chat=chat)
+        self.assertEqual(session_before.pk, session_after.pk)
+        self.assertEqual(session_after.current_menu, selector_menu)
+
+        payload_page_2 = self._sent_list(mocked_send_list)
+        rows_page_2 = payload_page_2['sections'][0]['rows']
+        # 2 remaining offices + "Sebelumnya" only (no more "Lainnya").
+        self.assertEqual(len(rows_page_2), 3)
+        self.assertEqual([r['title'] for r in rows_page_2[:2]], [o.name for o in offices[7:9]])
+        self.assertEqual(rows_page_2[2]['title'], '◀️ Samsat Sebelumnya')
+        self.assertEqual(rows_page_2[2]['rowId'], '__page_1')
+
+    @mock.patch('apps.chats.conversation_engine.send_list_message', return_value={'status': 'sent', 'provider_message_id': None})
+    def test_office_selector_tap_matches_by_office_pk_rowid(self, mocked_send_list):
+        office_a = Office.objects.create(name='Samsat A')
+        OfficeInboxConfig.objects.create(office=office_a, enabled=True)
+        selector_menu = BotMenu.objects.create(name='Pilih Office', is_office_selector=True)
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Hubungi Petugas', trigger_value='4',
+            action_type=BotMenuItem.ACTION_SHOW_MENU, target_menu=selector_menu,
+        )
+        chat = self._chat()
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+        handle_conversation_message(self.session, self._inbound(chat, '4', 'm2'))
+
+        # Real list tap: body carries the office's NAME (the row title),
+        # list_reply_id carries the office's pk.
+        handle_conversation_message(
+            self.session, self._inbound(chat, 'Samsat A', 'm3', list_reply_id=str(office_a.pk)),
+        )
+
+        chat.refresh_from_db()
+        self.assertEqual(chat.office, office_a)
+        session = ConversationSession.objects.get(chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR)
+        self.assertEqual(session.office, office_a)

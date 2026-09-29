@@ -81,6 +81,19 @@ class ParsedMessage:
     # fields" list. Optional and defensively extracted like every other
     # field here — never required, never guessed when absent.
     push_name: Optional[str]
+    # Discussed requirement — Conversation/Bot Engine interactive list
+    # menus. CONFIRMED via a real captured webhook delivery (project
+    # operator tapped a live `sendList` row): when a citizen taps a list
+    # row, `payload['body']` carries the row's TITLE text (not this id),
+    # and `payload['_data']['Message']['listResponseMessage']
+    # ['singleSelectReply']['selectedRowID']` carries the stable `rowId`
+    # the bot itself assigned when building that list — used by
+    # apps.chats.conversation_engine to match the tap unambiguously
+    # (label text alone can't disambiguate paginated "Selanjutnya"/
+    # "Sebelumnya" rows across more than one page). `None` for any
+    # ordinary text message (including a manually-TYPED reply to a list
+    # menu) — never guessed.
+    list_reply_row_id: Optional[str]
 
 
 def parse_envelope(data) -> WebhookEnvelope:
@@ -158,6 +171,17 @@ def parse_message(payload: dict) -> ParsedMessage:
     if not isinstance(push_name, str) or not push_name:
         push_name = None
 
+    list_reply_row_id = None
+    message_field = data_field.get('Message') if isinstance(data_field, dict) else None
+    if isinstance(message_field, dict):
+        list_response = message_field.get('listResponseMessage')
+        if isinstance(list_response, dict):
+            single_select = list_response.get('singleSelectReply')
+            if isinstance(single_select, dict):
+                candidate = single_select.get('selectedRowID')
+                if isinstance(candidate, str) and candidate:
+                    list_reply_row_id = candidate
+
     return ParsedMessage(
         provider_message_id=provider_message_id,
         chat_provider_id=chat_provider_id,
@@ -169,6 +193,7 @@ def parse_message(payload: dict) -> ParsedMessage:
         is_group=is_group,
         timestamp=timestamp,
         push_name=push_name,
+        list_reply_row_id=list_reply_row_id,
     )
 
 

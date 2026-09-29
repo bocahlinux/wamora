@@ -24,8 +24,9 @@ from django.db.models.functions import TruncHour
 
 from apps.audit.models import AuditLog
 from apps.authn.authentication import JWTAuthentication
-from apps.authn.permissions import HasReadingScope
-from apps.chats.models import Message
+from apps.authn.permissions import HasOfficeAccess, HasReadingScope
+from apps.chats.authorization import chats_visible_to
+from apps.chats.models import ConversationSession, Message
 from apps.webhooks.models import WebhookEvent
 
 DEFAULT_ACTIVITY_LIMIT = 20
@@ -167,3 +168,47 @@ class ActivityFeedView(APIView):
         if value < 1:
             return DEFAULT_ACTIVITY_LIMIT
         return min(value, MAX_ACTIVITY_LIMIT)
+
+
+class PendingChatsView(APIView):
+    """GET /api/dashboard/pending-chats/ — Conversation/Bot Engine
+    handoff queue: every Chat with a WAITING_OPERATOR
+    `ConversationSession` (a citizen who chose "chat dengan petugas") that
+    nobody has claimed yet (`assigned_to` is still null). Discussed
+    requirement: this is the "pesan masuk yang harus segera ditangani"
+    dashboard notification.
+
+    Visibility reuses `apps.chats.authorization.chats_visible_to` as-is —
+    no new rule invented. Concretely: an Office Admin/Operator sees only
+    their own Office's pending chats; a Superadmin/Global Admin sees
+    every Office's, PLUS any chat with `office=None` (every accepting
+    Office currently disabled, or no Office was ever selected) — which is
+    otherwise invisible to anyone else, per that function's own docstring
+    (discussed requirement: this is the one case that must always reach a
+    globally-accessing actor, since no Office would otherwise be notified
+    at all).
+    """
+
+    authentication_classes = [JWTAuthentication]
+    # Same permission shape as apps.chats.views.ChatListView — this reads
+    # the exact same Chat rows, filtered further.
+    permission_classes = [IsAuthenticated, (HasReadingScope | HasOfficeAccess)]
+
+    def get(self, request):
+        queryset = chats_visible_to(request.user).filter(
+            assigned_to__isnull=True,
+            conversation_sessions__state=ConversationSession.STATE_WAITING_OPERATOR,
+        ).select_related('contact', 'office').order_by('last_message_at')
+
+        results = [
+            {
+                'id': chat.pk,
+                'provider_chat_id': chat.provider_chat_id,
+                'contact_name': chat.contact.display_name if chat.contact_id and chat.contact.display_name else None,
+                'phone_number': chat.contact.phone_number if chat.contact_id and chat.contact.phone_number else None,
+                'office': {'id': chat.office_id, 'name': chat.office.name} if chat.office_id else None,
+                'waiting_since': chat.last_message_at.isoformat() if chat.last_message_at else None,
+            }
+            for chat in queryset
+        ]
+        return Response({'count': len(results), 'results': results})

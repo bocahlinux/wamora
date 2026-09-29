@@ -57,6 +57,17 @@ class BotConfig(TimeStampedModel):
     root_menu = models.ForeignKey(
         'BotMenu', on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
     )
+    # Discussed requirement — Conversation/Bot Engine interactive list
+    # menus (`apps.chats.conversation_engine`'s list-rendering, WAHA's
+    # `sendList` — live-verified request shape:
+    # `message.footer`/`message.button`). GLOBAL-only, same as everything
+    # else this project's own per-office BotConfig capability was locked
+    # down to (apps.bot.views._may_access) — one shared bot, one shared
+    # list "chrome", not per-Office. Blank/default text is safe: WAHA
+    # accepts an empty footer, and `list_button_text` defaults to a
+    # sensible label rather than an empty button.
+    list_footer_text = models.TextField(blank=True, default='')
+    list_button_text = models.CharField(max_length=32, blank=True, default='Pilih')
 
     def __str__(self):
         return f'BotConfig({self.office or "GLOBAL"})'

@@ -106,15 +106,17 @@ function AdministrationSettings({ hasGlobalAccess, me }: { hasGlobalAccess: bool
         >
           Inbox Configuration
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'bot-config'}
-          className={['wa-settings-tab', tab === 'bot-config' ? 'wa-settings-tab--active' : ''].filter(Boolean).join(' ')}
-          onClick={() => setTab('bot-config')}
-        >
-          Bot Configuration
-        </button>
+        {hasGlobalAccess ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'bot-config'}
+            className={['wa-settings-tab', tab === 'bot-config' ? 'wa-settings-tab--active' : ''].filter(Boolean).join(' ')}
+            onClick={() => setTab('bot-config')}
+          >
+            Bot Configuration
+          </button>
+        ) : null}
         {me.is_superuser ? (
           <button
             type="button"
@@ -157,13 +159,7 @@ function AdministrationSettings({ hasGlobalAccess, me }: { hasGlobalAccess: bool
         )
       ) : null}
 
-      {tab === 'bot-config' ? (
-        officesQuery.status === 'error' && hasGlobalAccess ? (
-          <ErrorState error={officesQuery.error} onRetry={officesQuery.refetch} />
-        ) : (
-          <SettingsBotConfigPanel me={me} offices={officesQuery.status === 'success' ? officesQuery.data : []} />
-        )
-      ) : null}
+      {tab === 'bot-config' && hasGlobalAccess ? <SettingsBotConfigPanel /> : null}
 
       {tab === 'roles' && me.is_superuser ? <SettingsRolesPanel roles={rolesQuery} /> : null}
     </div>

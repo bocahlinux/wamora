@@ -108,6 +108,12 @@ export function Sidebar({ collapsed, onToggleCollapsed, mobileOpen, onCloseMobil
               <span className="wa-sidebar__account-name" title={meQuery.status === 'success' ? meQuery.data.display_name : undefined}>
                 {meQuery.status === 'success' ? meQuery.data.display_name : 'Signed in'}
               </span>
+              {/* Discussed requirement — every role may self-edit their
+                  own name/initial/password; reachable from here regardless
+                  of role, same as "Sign out" right below it. */}
+              <NavLink to="/profile" className="wa-sidebar__logout" onClick={onCloseMobile}>
+                Profile
+              </NavLink>
               <button type="button" className="wa-sidebar__logout" onClick={logout}>
                 Sign out
               </button>

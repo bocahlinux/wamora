@@ -103,4 +103,71 @@ router.post('/blast/send', requireOfficeDispatchKey, async (req, res) => {
   });
 });
 
+// Discussed requirement — Conversation/Bot Engine interactive list menus
+// (`apps.chats.conversation_engine`, via `apps.blast.bff_client.send_list_message`
+// — same Django-side module `send_blast_message` above already lives in,
+// despite the "blast" name; this module is really this project's one
+// generic Office/Celery/Django -> BFF internal-dispatch surface, not
+// blast-exclusive). New ALLOWLISTED WAHA operation (`sendList`,
+// CLAUDE.md rule 5) — `sendText` above is completely untouched, both
+// remain available side by side. Verified live against this exact WAHA
+// deployment (GOWS engine) by the project operator directly, request
+// shape confirmed via a real successful `sendList` call before this
+// route was written — never a guess from WAHA's general docs alone.
+router.post('/blast/send-list', requireOfficeDispatchKey, async (req, res) => {
+  const { session, chatId, list } = req.body ?? {};
+
+  if (typeof session !== 'string' || !session) {
+    sendBadRequest(res, 'session is required');
+    return;
+  }
+  if (!config.wahaSessionName || session !== config.wahaSessionName) {
+    sendNotFound(res, 'Unknown session');
+    return;
+  }
+  if (typeof chatId !== 'string' || !chatId || !list || typeof list !== 'object') {
+    sendBadRequest(res, 'chatId and list are required');
+    return;
+  }
+
+  const idempotencyKey = req.header('Idempotency-Key') ?? '';
+
+  // WAHA's confirmed `sendList` request shape (project operator's own
+  // live-verified curl, not from general docs): {chatId, message: {...},
+  // reply_to, session} — `list` here IS that inner `message` object,
+  // built by apps.chats.conversation_engine, passed through verbatim
+  // (never reshaped here — this route stays a thin, allowlisted pass-
+  // through, same discipline as `/blast/send` above).
+  const result = await callWaha('sendList', session, {
+    baseUrl: config.wahaBaseUrl,
+    apiKey: config.wahaApiKey,
+    timeoutMs: config.wahaTimeoutMs,
+    body: { session, chatId, message: list, reply_to: null },
+  });
+
+  let responseStatus: 'sent' | 'failed' | 'unknown';
+  let providerMessageId: string | undefined;
+  if (result.outcome === 'success') {
+    responseStatus = 'sent';
+    const body = (result.json ?? {}) as Record<string, unknown>;
+    providerMessageId = typeof body.id === 'string' ? body.id : undefined;
+  } else if (result.outcome === 'http_error') {
+    responseStatus = 'failed';
+  } else {
+    responseStatus = 'unknown';
+  }
+
+  logAuditFallback({
+    action: 'blast.list.send',
+    target: `${session}:${chatId}`,
+    result: responseStatus === 'sent' ? 'success' : 'failure',
+  });
+
+  res.status(200).json({
+    status: responseStatus,
+    ...(providerMessageId !== undefined ? { providerMessageId } : {}),
+    idempotencyKey: idempotencyKey || undefined,
+  });
+});
+
 export default router;

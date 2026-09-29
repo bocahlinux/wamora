@@ -5,7 +5,7 @@ from django.db import DatabaseError, transaction
 from django.test import TestCase
 from django.utils import timezone
 
-from apps.chats.models import Chat, Contact, Message
+from apps.chats.models import Chat, Contact, ConversationSession, Message
 from apps.offices.models import Office
 from apps.waha_sessions.models import WahaSession
 from apps.webhooks.models import WebhookEvent
@@ -26,6 +26,7 @@ def _parsed_message(**overrides):
         is_group=False,
         timestamp=timezone.now(),
         push_name=None,
+        list_reply_row_id=None,
     )
     defaults.update(overrides)
     return ParsedMessage(**defaults)
@@ -90,6 +91,7 @@ class PersistMessageDuplicateTests(TestCase):
             is_group=False,
             timestamp=timezone.now(),
             push_name=None,
+            list_reply_row_id=None,
         )
         persist_message(session, parsed)
         with self.assertRaises(DuplicateMessage):
@@ -117,6 +119,7 @@ class PersistMessagePushNameTests(TestCase):
             is_group=False,
             timestamp=timezone.now(),
             push_name='Yuk Code Creative',
+            list_reply_row_id=None,
         )
         persist_message(session, parsed)
 
@@ -141,6 +144,7 @@ class PersistMessagePushNameTests(TestCase):
             is_group=False,
             timestamp=timezone.now(),
             push_name=None,
+            list_reply_row_id=None,
         )
         persist_message(session, parsed)
 
@@ -160,6 +164,7 @@ class PersistMessagePushNameTests(TestCase):
             is_group=False,
             timestamp=timezone.now(),
             push_name='Should Not Apply',
+            list_reply_row_id=None,
         )
         persist_message(session, parsed)
         self.assertFalse(Contact.objects.exists())
@@ -177,6 +182,7 @@ class PersistMessagePushNameTests(TestCase):
             is_group=True,
             timestamp=timezone.now(),
             push_name='Should Not Apply',
+            list_reply_row_id=None,
         )
         persist_message(session, parsed)
         self.assertFalse(Contact.objects.exists())
@@ -244,6 +250,107 @@ class PersistMessageOfficeRoutingTests(TestCase):
 
         chat.refresh_from_db()
         self.assertEqual(chat.office, office_a)
+
+
+class PersistMessageOfficeSnapshotTests(TestCase):
+    """Discussed requirement — per-Office Inbox history partitioning:
+    Message.office is a SNAPSHOT of chat.office at persist time,
+    deliberately never retroactively updated (Message.office's own field
+    comment)."""
+
+    def test_message_office_matches_chat_office_at_persist_time(self):
+        office = Office.objects.create(name='Samsat Palangka Raya')
+        session = WahaSession.objects.create(name='no_epahari', office=office)
+        message = persist_message(session, _parsed_message())
+        self.assertEqual(message.office, office)
+
+    def test_message_office_is_null_for_unmapped_chat(self):
+        session = WahaSession.objects.create(name='no_epahari')  # office=None
+        message = persist_message(session, _parsed_message())
+        self.assertIsNone(message.office)
+
+    def test_earlier_messages_keep_their_own_office_after_chat_office_changes(self):
+        office_a = Office.objects.create(name='Samsat Kasongan')
+        office_b = Office.objects.create(name='Samsat Palangka Raya')
+        session = WahaSession.objects.create(name='no_epahari')  # office=None
+        chat = Chat.objects.create(session=session, provider_chat_id='c1@lid')
+
+        message_1 = persist_message(session, _parsed_message(provider_message_id='m1'))
+        self.assertIsNone(message_1.office)
+
+        chat.office = office_a
+        chat.save(update_fields=['office'])
+        message_2 = persist_message(session, _parsed_message(provider_message_id='m2'))
+        self.assertEqual(message_2.office, office_a)
+
+        chat.office = office_b
+        chat.save(update_fields=['office'])
+        message_3 = persist_message(session, _parsed_message(provider_message_id='m3'))
+        self.assertEqual(message_3.office, office_b)
+
+        message_1.refresh_from_db()
+        message_2.refresh_from_db()
+        self.assertIsNone(message_1.office)
+        self.assertEqual(message_2.office, office_a)
+
+
+class PersistMessageOutboundCompletionFallbackTests(TestCase):
+    """Regression — found live: apps.chats.conversation_engine's own
+    session-completion paths (close_waiting_session/
+    expire_waiting_operator_session/_handle_menu_item's completion
+    branches) always complete the ConversationSession FIRST, then send
+    the "sesi selesai" confirmation — so by the time that OUTBOUND,
+    self-sent message is reconciled, its own session is already
+    COMPLETED (not "active"), and was incorrectly falling through to
+    `None` (persist_message's own comment: "between rounds"), banishing
+    the citizen's own closing confirmation out of the Office they were
+    just routed to. Fixed: an OUTBOUND message with no active session
+    falls back to the most recently created session's Office instead —
+    safe because the bot never speaks first into a not-yet-started round
+    (only a citizen's INBOUND message can be pre-handoff chatter)."""
+
+    def _parsed_outbound(self, **overrides):
+        defaults = dict(
+            provider_message_id='out-1', chat_provider_id='c1@lid', sender_provider_id='c1@lid',
+            sender_alt=None, from_me=True, body='closing text', message_type='text', is_group=False,
+            timestamp=timezone.now(), push_name=None, list_reply_row_id=None,
+        )
+        defaults.update(overrides)
+        return ParsedMessage(**defaults)
+
+    def test_closing_confirmation_is_tagged_to_the_just_completed_sessions_office(self):
+        office = Office.objects.create(name='Samsat Kasongan')
+        session = WahaSession.objects.create(name='no_epahari')
+        chat = Chat.objects.create(session=session, provider_chat_id='c1@lid', office=office)
+        cs = ConversationSession.objects.create(
+            chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR, office=office,
+        )
+        # Exact order apps.chats.conversation_engine.close_waiting_session
+        # uses: complete the session, THEN (later, asynchronously
+        # reconciled) the closing text gets persisted.
+        cs.state = ConversationSession.STATE_COMPLETED
+        cs.completed_at = timezone.now()
+        cs.current_menu = None
+        cs.save(update_fields=['state', 'completed_at', 'current_menu', 'updated_at'])
+
+        message = persist_message(session, self._parsed_outbound())
+
+        self.assertEqual(message.office, office)
+
+    def test_inbound_pre_handoff_message_after_close_is_still_none(self):
+        # The fix above is deliberately OUTBOUND-only — an INBOUND
+        # message (the citizen re-engaging) in the same "no active
+        # session" state must still resolve to None, never the old
+        # session's Office (that's the original "Menu/2/2" bug this
+        # would otherwise resurrect).
+        office = Office.objects.create(name='Samsat Kasongan')
+        session = WahaSession.objects.create(name='no_epahari')
+        chat = Chat.objects.create(session=session, provider_chat_id='c1@lid', office=office)
+        ConversationSession.objects.create(chat=chat, state=ConversationSession.STATE_COMPLETED, office=office)
+
+        message = persist_message(session, _parsed_message(from_me=False))
+
+        self.assertIsNone(message.office)
 
 
 class OfficeRoutedInboxVisibilityTests(TestCase):
@@ -378,3 +485,84 @@ class WebhookConversationEngineOfficeScopedIntegrationTests(TestCase):
         mocked_send.assert_not_called()
         chat.refresh_from_db()
         self.assertIsNone(chat.welcome_sent_at)
+
+
+class WebhookConversationEngineOfficeReselectionTests(TestCase):
+    """Regression — found live: a citizen who closed a handoff to Office
+    A, then re-triggered the bot menu (typing "Menu" and navigating
+    again) BEFORE picking any Office for this new round, had that entire
+    pre-handoff exchange mis-tagged as Office A's history (`chat.office`
+    is only updated once a NEW Office is actually picked, so it still
+    held Office A's value from the previous round) — showing up in
+    Office A's Inbox even though the citizen hadn't been routed anywhere
+    yet this round. `persist_message`'s own comment documents the fix:
+    source `Message.office` from the Chat's currently ACTIVE
+    `ConversationSession.office` instead."""
+
+    def setUp(self):
+        from apps.bot.models import BotConfig, BotMenu, BotMenuItem, BotTrigger
+        from apps.offices.models import OfficeInboxConfig
+
+        self.office_a = Office.objects.create(name='Samsat Kasongan')
+        OfficeInboxConfig.objects.create(office=self.office_a, enabled=True)
+        self.root_menu = BotMenu.objects.create(name='Main Menu', intro_text='Selamat datang.')
+        selector_menu = BotMenu.objects.create(name='Pilih Office', is_office_selector=True)
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Chat dengan Operator', trigger_value='4',
+            action_type=BotMenuItem.ACTION_SHOW_MENU, target_menu=selector_menu,
+        )
+        BotTrigger.objects.create(office=None, keyword='menu', target_menu=self.root_menu, enabled=True)
+        BotConfig.objects.create(office=None, enabled=True, root_menu=self.root_menu)
+        self.session_name = 'no_epahari'
+        self.chat_id = 'wp1@lid'
+
+    def _send(self, body, event_id):
+        ingest_webhook(_envelope(self.session_name, self.chat_id, body, event_id))
+
+    def _last_message_office(self):
+        return Message.objects.filter(chat__provider_chat_id=self.chat_id).order_by('-id').first().office
+
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_pre_handoff_navigation_after_a_closed_session_is_never_tagged_to_the_old_office(self, mocked_send):
+        # Round 1: trigger, pick "Chat dengan Operator", select the only
+        # available Office (position 1 — Kasongan).
+        self._send('Menu', 'evt-1')
+        self._send('4', 'evt-2')
+        self._send('1', 'evt-3')  # the selection reply itself stays None — see below
+        chat = Chat.objects.get(provider_chat_id=self.chat_id)
+        self.assertEqual(chat.office, self.office_a)
+        self._send('Terima kasih', 'evt-3b')  # first message AFTER the pick takes effect
+        self.assertEqual(self._last_message_office(), self.office_a)
+
+        # Operator closes the session — same STATE_COMPLETED transition
+        # apps.chats.views.ChatCloseSessionView triggers.
+        ConversationSession.objects.filter(chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR).update(
+            state=ConversationSession.STATE_COMPLETED,
+        )
+
+        # Round 2: the citizen chats again and navigates the bot menu —
+        # but has NOT picked an Office yet this round. None of this may
+        # be tagged to Office A (the previous round's pick).
+        self._send('Selamat sore pak', 'evt-4')
+        self.assertIsNone(self._last_message_office())
+        self._send('Menu', 'evt-5')
+        self.assertIsNone(self._last_message_office())
+        self._send('4', 'evt-6')
+        self.assertIsNone(self._last_message_office())
+
+        # The selection reply ITSELF ("1") is still tagged None — an
+        # accepted, documented edge case (the Office isn't applied until
+        # AFTER this message is already persisted — see
+        # conversation_engine._handle_office_selector_reply's own "Race
+        # note"). What matters is the SESSION now reflects the pick...
+        self._send('1', 'evt-7')
+        chat.refresh_from_db()
+        self.assertEqual(chat.office, self.office_a)
+        self.assertEqual(
+            ConversationSession.objects.get(chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR).office,
+            self.office_a,
+        )
+        # ...so the NEXT message (an operator's reply, or anything after)
+        # correctly resumes tagging to the newly-picked Office.
+        self._send('Terima kasih', 'evt-8')
+        self.assertEqual(self._last_message_office(), self.office_a)

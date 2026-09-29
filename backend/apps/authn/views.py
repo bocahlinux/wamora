@@ -163,4 +163,11 @@ class MeView(APIView):
             # meaningful only alongside `role.is_operator`, same as
             # every other membership-only field here.
             'is_available': membership.is_available if membership else None,
+            # Discussed requirement — the smallest addition needed for
+            # the frontend to append "- {initial}" to every manually-typed
+            # Inbox reply (InboxPage.tsx's handleSend), without a second
+            # request to GET /api/auth/me/profile/. `''` for anyone who
+            # hasn't set one yet (never backfilled — see
+            # apps.offices.models.UserProfile's own docstring).
+            'initial': getattr(getattr(user, 'profile', None), 'initial', '') or '',
         })
