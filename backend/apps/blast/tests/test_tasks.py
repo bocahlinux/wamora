@@ -116,6 +116,19 @@ class DispatchBlastRecipientTaskTests(TestCase):
         self.user = User.objects.create_user('creator', password='pw')
         self.campaign = make_campaign(self.session, self.user, status=BlastCampaign.STATUS_SENDING, recipient_count=1)
         self.recipient = self.campaign.recipients.first()
+        # Every existing test in this class exercises the SEND path, not
+        # the number-validity check itself (that has its own test class
+        # below) — a definite `True` here keeps them behaving exactly as
+        # before this check was added.
+        self.check_number_patcher = mock.patch('apps.blast.tasks.check_number_exists', return_value=True)
+        self.check_number_patcher.start()
+        self.addCleanup(self.check_number_patcher.stop)
+        # Best-effort instant-refresh lookup — irrelevant to every test in
+        # this class, patched out so it never touches the real Chat/Celery
+        # machinery.
+        self.instant_refresh_patcher = mock.patch('apps.blast.tasks._trigger_instant_refresh')
+        self.instant_refresh_patcher.start()
+        self.addCleanup(self.instant_refresh_patcher.stop)
 
     def test_missing_recipient_is_a_no_op(self):
         result = dispatch_blast_recipient_task.apply(args=[999999]).result
@@ -228,10 +241,94 @@ class DispatchBlastRecipientTaskTests(TestCase):
         self.assertEqual(self.recipient.status, BR.STATUS_SENT)
 
 
+class NumberValidityCheckTests(TestCase):
+    """Discussed requirement — a recipient's number is checked for
+    WhatsApp validity before any send is attempted. Only a DEFINITE
+    `False` short-circuits into `STATUS_INVALID_NUMBER`; `True` or `None`
+    (ambiguous) falls through to the unchanged send path."""
+
+    def setUp(self):
+        self.session = WahaSession.objects.create(name='primary')
+        self.user = User.objects.create_user('creator', password='pw')
+        self.campaign = make_campaign(self.session, self.user, status=BlastCampaign.STATUS_SENDING, recipient_count=1)
+        self.recipient = self.campaign.recipients.first()
+
+    def test_definite_invalid_number_short_circuits_without_sending(self):
+        with mock.patch('apps.blast.tasks.check_number_exists', return_value=False):
+            with mock.patch('apps.blast.tasks.send_blast_message') as mocked_send:
+                result = dispatch_blast_recipient_task.apply(args=[self.recipient.pk]).result
+        mocked_send.assert_not_called()
+        self.assertEqual(result['result'], 'invalid_number')
+        self.recipient.refresh_from_db()
+        self.assertEqual(self.recipient.status, BlastRecipient.STATUS_INVALID_NUMBER)
+        self.assertTrue(self.recipient.failure_reason)
+        # Never dropped from the DB, never re-attempted — a real terminal
+        # status like any other.
+        self.assertIn(BlastRecipient.STATUS_INVALID_NUMBER, BlastRecipient.TERMINAL_STATUSES)
+
+    def test_invalid_number_still_finalizes_the_campaign(self):
+        with mock.patch('apps.blast.tasks.check_number_exists', return_value=False):
+            with mock.patch('apps.blast.tasks.send_blast_message'):
+                dispatch_blast_recipient_task.apply(args=[self.recipient.pk])
+        self.campaign.refresh_from_db()
+        self.assertEqual(self.campaign.status, BlastCampaign.STATUS_COMPLETED)
+
+    def test_confirmed_valid_number_proceeds_to_send(self):
+        with mock.patch('apps.blast.tasks.check_number_exists', return_value=True):
+            with mock.patch(
+                'apps.blast.tasks.send_blast_message',
+                return_value={'status': 'sent', 'provider_message_id': 'wa-1'},
+            ) as mocked_send:
+                dispatch_blast_recipient_task.apply(args=[self.recipient.pk])
+        mocked_send.assert_called_once()
+        self.recipient.refresh_from_db()
+        self.assertEqual(self.recipient.status, BlastRecipient.STATUS_SENT)
+
+    def test_ambiguous_number_check_still_proceeds_to_send(self):
+        # None = a genuine BFF/WAHA-level failure while checking — fail
+        # OPEN on ambiguity, never treat "couldn't confirm" as "invalid".
+        with mock.patch('apps.blast.tasks.check_number_exists', return_value=None):
+            with mock.patch(
+                'apps.blast.tasks.send_blast_message',
+                return_value={'status': 'sent', 'provider_message_id': 'wa-1'},
+            ) as mocked_send:
+                dispatch_blast_recipient_task.apply(args=[self.recipient.pk])
+        mocked_send.assert_called_once()
+        self.recipient.refresh_from_db()
+        self.assertEqual(self.recipient.status, BlastRecipient.STATUS_SENT)
+
+    def test_number_check_raising_bff_dispatch_error_is_treated_as_ambiguous(self):
+        with mock.patch('apps.blast.tasks.check_number_exists', side_effect=BffDispatchError('boom')):
+            with mock.patch(
+                'apps.blast.tasks.send_blast_message',
+                return_value={'status': 'sent', 'provider_message_id': 'wa-1'},
+            ) as mocked_send:
+                dispatch_blast_recipient_task.apply(args=[self.recipient.pk])
+        mocked_send.assert_called_once()
+
+    def test_rendered_text_uses_recipient_variables(self):
+        BlastCampaign.objects.filter(pk=self.campaign.pk).update(message_template='Halo {{nama}}, nopol {{nopol}}')
+        BlastRecipient.objects.filter(pk=self.recipient.pk).update(variables={'nama': 'Anto', 'nopol': 'KH1234AA'})
+        with mock.patch('apps.blast.tasks.check_number_exists', return_value=True):
+            with mock.patch(
+                'apps.blast.tasks.send_blast_message',
+                return_value={'status': 'sent', 'provider_message_id': None},
+            ) as mocked_send:
+                dispatch_blast_recipient_task.apply(args=[self.recipient.pk])
+        sent_text = mocked_send.call_args.args[2]
+        self.assertEqual(sent_text, 'Halo Anto, nopol KH1234AA')
+
+
 class CampaignFinalizationTests(TestCase):
     def setUp(self):
         self.session = WahaSession.objects.create(name='primary')
         self.user = User.objects.create_user('creator', password='pw')
+        self.check_number_patcher = mock.patch('apps.blast.tasks.check_number_exists', return_value=True)
+        self.check_number_patcher.start()
+        self.addCleanup(self.check_number_patcher.stop)
+        self.instant_refresh_patcher = mock.patch('apps.blast.tasks._trigger_instant_refresh')
+        self.instant_refresh_patcher.start()
+        self.addCleanup(self.instant_refresh_patcher.stop)
 
     def test_campaign_completes_when_all_recipients_reach_a_terminal_status_with_at_least_one_sent(self):
         campaign = make_campaign(self.session, self.user, status=BlastCampaign.STATUS_SENDING, recipient_count=2)

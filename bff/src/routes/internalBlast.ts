@@ -170,4 +170,46 @@ router.post('/blast/send-list', requireOfficeDispatchKey, async (req, res) => {
   });
 });
 
+// Blast number-validity check (Discussed requirement, live-verified
+// against the real WAHA deployment — see wahaAllowlist.ts's own comment
+// for the evidence): `{numberExists: boolean}` for a definite answer,
+// `null` ONLY for a genuine BFF/WAHA-level failure (timeout/network/http
+// error) — never conflated with a definite `false`, so
+// apps.blast.tasks.dispatch_blast_recipient_task can short-circuit on a
+// definite `false` only, exactly like sendText's own sent/failed/unknown
+// discipline.
+router.get('/blast/check-number', requireOfficeDispatchKey, async (req, res) => {
+  const session = typeof req.query.session === 'string' ? req.query.session : '';
+  const phone = typeof req.query.phone === 'string' ? req.query.phone : '';
+
+  if (!session) {
+    sendBadRequest(res, 'session is required');
+    return;
+  }
+  if (!config.wahaSessionName || session !== config.wahaSessionName) {
+    sendNotFound(res, 'Unknown session');
+    return;
+  }
+  if (!phone) {
+    sendBadRequest(res, 'phone is required');
+    return;
+  }
+
+  const result = await callWaha('checkNumberExists', session, {
+    baseUrl: config.wahaBaseUrl,
+    apiKey: config.wahaApiKey,
+    timeoutMs: config.wahaTimeoutMs,
+    query: { phone, session },
+  });
+
+  if (result.outcome !== 'success') {
+    res.status(200).json({ numberExists: null });
+    return;
+  }
+
+  const body = (result.json ?? {}) as Record<string, unknown>;
+  const numberExists = typeof body.numberExists === 'boolean' ? body.numberExists : null;
+  res.status(200).json({ numberExists });
+});
+
 export default router;

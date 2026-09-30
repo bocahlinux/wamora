@@ -9,66 +9,17 @@
   margin-bottom: var(--space-4);
 }
 
-/* ---- Campaign list (BlastListPage) -------------------------------------- */
+/* ---- Campaign table (BlastListPage) -------------------------------------- */
 
-.wa-blast-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.wa-blast-list__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  text-decoration: none;
-  color: inherit;
-}
-
-.wa-blast-list__row:hover {
-  background: var(--surface-alt);
-}
-
-.wa-blast-list__main {
-  min-width: 0;
-  flex: 1;
-}
-
-.wa-blast-list__name {
-  font-size: var(--font-size-body);
-  font-weight: 500;
+.wa-blast-table__name-link {
   color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-weight: 500;
+  text-decoration: none;
 }
 
-.wa-blast-list__meta {
-  margin-top: 2px;
-  font-size: var(--font-size-caption);
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.wa-blast-list__side {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--space-1);
-  flex-shrink: 0;
-}
-
-.wa-blast-list__date {
-  font-size: var(--font-size-caption);
-  color: var(--text-muted);
+.wa-blast-table__name-link:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
 }
 
 /* ---- Limits banner (BlastCreatePage) ------------------------------------ */
@@ -93,11 +44,47 @@
 
 /* ---- Form (BlastCreatePage) ---------------------------------------------- */
 
+.wa-blast-form-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--card-gap);
+  max-width: 720px;
+}
+
+/* Sectioned Cards (Campaign details / Message / Recipients) — same
+   pattern ProfilePage.css established for its own sectioned form, reused
+   here rather than a third near-identical copy. */
+.wa-blast-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.wa-blast-section__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  color: var(--color-primary);
+}
+
+.wa-blast-section__title {
+  margin: 0;
+  font-size: var(--font-size-h4);
+  line-height: var(--line-height-h4);
+  font-weight: var(--font-weight-h4);
+  color: var(--text-primary);
+}
+
+.wa-blast-section__description {
+  margin: 2px 0 0;
+  font-size: var(--font-size-body-small);
+  color: var(--text-muted);
+}
+
 .wa-blast-form {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  max-width: 720px;
 }
 
 .wa-blast-form__field {
@@ -198,6 +185,21 @@
 .wa-blast-form__actions {
   display: flex;
   gap: var(--space-2);
+}
+
+@media (max-width: 640px) {
+  .wa-blast-form__actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--color-bg);
+    padding: var(--space-3) 0 max(var(--space-3), env(safe-area-inset-bottom));
+    flex-direction: column-reverse;
+  }
+
+  .wa-blast-form__actions .wa-button {
+    width: 100%;
+    justify-content: center;
+  }
 }
 
 /* ---- Detail page (BlastDetailPage) --------------------------------------- */

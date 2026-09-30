@@ -2,6 +2,7 @@ import { Menu, Moon, Sun, SunMoon } from 'lucide-react';
 
 import { useTheme } from '../../theme/ThemeContext';
 import { IconButton } from '../ui/IconButton';
+import { AccountMenu } from './AccountMenu';
 import './TopBar.css';
 
 interface TopBarProps {
@@ -34,6 +35,7 @@ export function TopBar({ onOpenMobileNav, title }: TopBarProps) {
           label={`Theme: ${THEME_LABEL[preference]} (click to change)`}
           onClick={() => setPreference(THEME_CYCLE[preference])}
         />
+        <AccountMenu />
       </div>
     </header>
   );

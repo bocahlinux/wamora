@@ -30,6 +30,7 @@ from django.contrib.auth.models import Group, User
 from django.db import transaction
 from rest_framework import serializers
 
+from .menu_items import MENU_ITEM_KEYS
 from .models import Office, OfficeInboxConfig, OfficeMembership, Role, UserProfile
 
 # Discussed requirement — username creation rule (Superadmin/Global
@@ -100,7 +101,7 @@ class RoleSerializer(serializers.ModelSerializer):
         model = Role
         fields = [
             'id', 'name', 'scopes', 'grants_global_access', 'is_office_admin', 'is_operator',
-            'created_at', 'updated_at',
+            'visible_menu_items', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -122,6 +123,26 @@ class RoleSerializer(serializers.ModelSerializer):
         for scope in value:
             if scope not in seen:
                 seen.append(scope)
+        return seen
+
+    def validate_visible_menu_items(self, value):
+        # Discussed requirement — Menu Access. `None` ("not customized,
+        # fall back to scope-based visibility" — Role's own docstring) is
+        # passed through as-is; `[]` (deliberately "show nothing") and
+        # any non-empty list are validated against the fixed
+        # MENU_ITEM_KEYS vocabulary, same discipline validate_scopes
+        # already applies to `scopes` — never a freeform value.
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise serializers.ValidationError('visible_menu_items must be a list or null.')
+        unknown = sorted(set(value) - set(MENU_ITEM_KEYS))
+        if unknown:
+            raise serializers.ValidationError(f'Unknown menu item key(s): {", ".join(unknown)}.')
+        seen = []
+        for key in value:
+            if key not in seen:
+                seen.append(key)
         return seen
 
 

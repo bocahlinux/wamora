@@ -1,0 +1,140 @@
+/* Profile page — modern/professional redesign, mobile-first (spec
+   Section 2 "calm operational" brand personality; Section 7 spacing
+   scale; --breakpoint-mobile from tokens.css). Below 640px this reads as
+   a single-column app-like screen (large touch targets, full-width
+   cards, no horizontal scroll) — the "feels like a PWA on mobile" part
+   of the request, without inventing a new visual language beyond this
+   project's existing design tokens. */
+
+.wa-profile-page__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--card-gap);
+  max-width: 640px;
+}
+
+.wa-profile-hero {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.wa-profile-hero__avatar {
+  flex-shrink: 0;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--color-primary-400), var(--color-blue-500));
+  color: #ffffff;
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-h3);
+  letter-spacing: 0.02em;
+}
+
+.wa-profile-hero__info {
+  min-width: 0;
+}
+
+.wa-profile-hero__name {
+  margin: 0;
+  font-size: var(--font-size-h3);
+  line-height: var(--line-height-h3);
+  font-weight: var(--font-weight-h3);
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+}
+
+.wa-profile-hero__username {
+  margin: 2px 0 var(--space-2);
+  font-size: var(--font-size-body-small);
+  color: var(--text-muted);
+}
+
+.wa-profile-hero__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.wa-profile-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.wa-profile-section__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  color: var(--color-primary);
+}
+
+.wa-profile-section__title {
+  margin: 0;
+  font-size: var(--font-size-h4);
+  line-height: var(--line-height-h4);
+  font-weight: var(--font-weight-h4);
+  color: var(--text-primary);
+}
+
+.wa-profile-section__description {
+  margin: 2px 0 0;
+  font-size: var(--font-size-body-small);
+  color: var(--text-muted);
+}
+
+.wa-profile-section__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.wa-profile-section__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+.wa-profile-page__saved {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--color-success);
+  font-size: var(--font-size-body-small);
+}
+
+.wa-profile-page__actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: var(--space-4);
+}
+
+@media (max-width: 640px) {
+  .wa-profile-page__body {
+    max-width: none;
+  }
+
+  .wa-profile-hero {
+    text-align: left;
+  }
+
+  .wa-profile-section__row {
+    grid-template-columns: 1fr;
+  }
+
+  .wa-profile-page__actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--color-bg);
+    padding: var(--space-3) 0 max(var(--space-3), env(safe-area-inset-bottom));
+    justify-content: stretch;
+  }
+
+  .wa-profile-page__actions .wa-button {
+    width: 100%;
+  }
+}

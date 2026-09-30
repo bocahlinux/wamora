@@ -13,8 +13,9 @@ though in practice a superuser always has every scope already.
 """
 
 from django.contrib.auth.models import User
-from django.db.models import ProtectedError
+from django.db.models import ProtectedError, Q
 from django.shortcuts import get_object_or_404
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -278,13 +279,52 @@ class UserListCreateView(APIView):
     permission_classes = [IsAuthenticated, HasUserAdministrationScope]
 
     def get(self, request):
+        # Server-side paginated (unlike OfficeListCreateView/RoleListCreateView
+        # below, deliberately NOT paginated — both are small catalogs reused
+        # as full-list dropdown sources by several other forms, e.g. this
+        # same page's own User form; Users has no such second consumer, and
+        # is the one admin table here that can realistically grow large).
+        # Same `PageNumberPagination` DRF envelope `ChatListView` already
+        # established (apps.chats.views) — one pagination convention, not
+        # a second one invented here.
         scope = _admin_scope(request.user)
         if scope is None:
             return _error(request, 403, 'forbidden', 'You do not have administration access.')
         users = _users_queryset()
         if scope != 'global':
             users = users.filter(office_membership__office=scope)
-        return Response(UserSerializer(users.order_by('username'), many=True).data)
+
+        # Discussed requirement — search + filters for the Settings
+        # tables, server-side for this one (the paginated table): a
+        # client-side filter would only ever see the current page's rows,
+        # silently hiding matches on other pages. `search` matches
+        # username/first_name/last_name (case-insensitive substring,
+        # same discipline as every other free-text filter in this
+        # codebase — never a raw SQL LIKE built by hand). `office`/`role`
+        # filter by id; an Office Admin's own `scope` filter above already
+        # restricts `office` to their own Office regardless of what's
+        # passed here. `is_active` accepts the literal strings DRF's own
+        # BooleanField parsing already recognizes.
+        search = request.query_params.get('search', '').strip()
+        if search:
+            users = users.filter(
+                Q(username__icontains=search) | Q(first_name__icontains=search) | Q(last_name__icontains=search)
+            )
+        office_param = request.query_params.get('office', '').strip()
+        if office_param:
+            users = users.filter(office_membership__office_id=office_param)
+        role_param = request.query_params.get('role', '').strip()
+        if role_param:
+            users = users.filter(office_membership__role_id=role_param)
+        is_active_param = request.query_params.get('is_active', '').strip().lower()
+        if is_active_param in ('true', '1'):
+            users = users.filter(is_active=True)
+        elif is_active_param in ('false', '0'):
+            users = users.filter(is_active=False)
+
+        paginator = PageNumberPagination()
+        page = paginator.paginate_queryset(users.order_by('username'), request, view=self)
+        return paginator.get_paginated_response(UserSerializer(page, many=True).data)
 
     def post(self, request):
         scope = _admin_scope(request.user)

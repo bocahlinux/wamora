@@ -1,5 +1,6 @@
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from apps.audit.models import AuditLog
@@ -16,7 +17,7 @@ from apps.chats.assignment import (
     valid_assignment_candidates,
 )
 from apps.chats.authorization import chats_visible_to
-from apps.chats.models import Chat
+from apps.chats.models import Chat, Message
 from apps.offices.models import ROLE_GLOBAL_ADMIN, ROLE_OFFICE_ADMIN, ROLE_OPERATOR, Office, OfficeMembership, Role
 from apps.waha_sessions.models import WahaSession
 
@@ -46,6 +47,15 @@ class AssignmentTestBase:
         self.office_b = Office.objects.create(name='Office B')
         self.chat_a = Chat.objects.create(session=self.session, provider_chat_id='wp-a@lid', office=self.office_a)
         self.chat_b = Chat.objects.create(session=self.session, provider_chat_id='wp-b@lid', office=self.office_b)
+        # Inbox-visibility rule (chats_visible_to): a Chat is only visible
+        # once it has a real inbound Message — every assignment scenario
+        # here models an already-ongoing conversation, so both fixtures
+        # get one, exactly like a real citizen-initiated chat would.
+        for chat in (self.chat_a, self.chat_b):
+            Message.objects.create(
+                session=self.session, chat=chat, provider_message_id=f'{chat.provider_chat_id}-msg-1',
+                direction=Message.DIRECTION_INBOUND, timestamp=timezone.now(),
+            )
 
     def _user(self, username, office=None, role=None, is_available=False, is_active=True, superuser=False):
         if superuser:

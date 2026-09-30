@@ -1,16 +1,24 @@
-import { Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes } from 'react-router-dom';
 
+import { BlastCampaignsPage } from '../pages/BlastCampaignsPage';
 import { BlastCreatePage } from '../pages/BlastCreatePage';
 import { BlastDetailPage } from '../pages/BlastDetailPage';
-import { BlastListPage } from '../pages/BlastListPage';
+import { BlastHistoryPage } from '../pages/BlastHistoryPage';
+import { BlastTemplatesPage } from '../pages/BlastTemplatesPage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { InboxPage } from '../pages/InboxPage';
 import { LoginPage } from '../pages/LoginPage';
+import { ManageUsersRolesPage } from '../pages/ManageUsersRolesPage';
+import { ManageUsersUsersPage } from '../pages/ManageUsersUsersPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
 import { ProfilePage } from '../pages/ProfilePage';
 import { ReportsPage } from '../pages/ReportsPage';
 import { SessionsPage } from '../pages/SessionsPage';
-import { SettingsPage } from '../pages/SettingsPage';
+import { SettingsBlastApiPage } from '../pages/SettingsBlastApiPage';
+import { SettingsBotConfigPage } from '../pages/SettingsBotConfigPage';
+import { SettingsInboxConfigPage } from '../pages/SettingsInboxConfigPage';
+import { SettingsMenuAccessPage } from '../pages/SettingsMenuAccessPage';
+import { SettingsOfficesPage } from '../pages/SettingsOfficesPage';
 import { WhatsAppPage } from '../pages/WhatsAppPage';
 import { ProtectedRoute } from './ProtectedRoute';
 
@@ -53,11 +61,28 @@ export function AppRoutes() {
           </ProtectedRoute>
         }
       />
+      <Route path="/blast" element={<Navigate to="/blast/campaigns" replace />} />
       <Route
-        path="/blast"
+        path="/blast/campaigns"
         element={
           <ProtectedRoute>
-            <BlastListPage />
+            <BlastCampaignsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/blast/templates"
+        element={
+          <ProtectedRoute>
+            <BlastTemplatesPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/blast/history"
+        element={
+          <ProtectedRoute>
+            <BlastHistoryPage />
           </ProtectedRoute>
         }
       />
@@ -77,22 +102,74 @@ export function AppRoutes() {
           </ProtectedRoute>
         }
       />
+      <Route path="/reports" element={<ProtectedRoute><ReportsPage /></ProtectedRoute>} />
+
+      {/* Discussed requirement — "Manage Users" is now its own top-level
+          sidebar section (Users/Roles), separate from Settings. */}
+      <Route path="/manage-users" element={<Navigate to="/manage-users/users" replace />} />
       <Route
-        path="/reports"
+        path="/manage-users/users"
         element={
           <ProtectedRoute>
-            <ReportsPage />
+            <ManageUsersUsersPage />
           </ProtectedRoute>
         }
       />
       <Route
-        path="/settings"
+        path="/manage-users/roles"
         element={
           <ProtectedRoute>
-            <SettingsPage />
+            <ManageUsersRolesPage />
           </ProtectedRoute>
         }
       />
+
+      {/* Discussed requirement — Settings is now a submenu (Offices/
+          Inbox Configuration/Bot Configuration/Blast API/Menu Access)
+          instead of one tabbed page; Users/Roles moved to Manage Users
+          above. */}
+      <Route path="/settings" element={<Navigate to="/settings/offices" replace />} />
+      <Route
+        path="/settings/offices"
+        element={
+          <ProtectedRoute>
+            <SettingsOfficesPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings/inbox-config"
+        element={
+          <ProtectedRoute>
+            <SettingsInboxConfigPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings/bot-config"
+        element={
+          <ProtectedRoute>
+            <SettingsBotConfigPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings/blast-api"
+        element={
+          <ProtectedRoute>
+            <SettingsBlastApiPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings/menu-access"
+        element={
+          <ProtectedRoute>
+            <SettingsMenuAccessPage />
+          </ProtectedRoute>
+        }
+      />
+
       <Route
         path="/profile"
         element={

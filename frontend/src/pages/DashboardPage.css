@@ -2,6 +2,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: var(--card-gap);
+  margin-top: var(--section-gap);
 }
 
 .wa-health-card {

@@ -37,6 +37,8 @@
 
 .wa-settings-table-wrap {
   overflow-x: auto;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
 }
 
 .wa-settings-table {
@@ -48,14 +50,96 @@
 .wa-settings-table th,
 .wa-settings-table td {
   text-align: left;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-3);
   border-bottom: 1px solid var(--border-default);
   white-space: nowrap;
 }
 
 .wa-settings-table th {
   color: var(--text-secondary);
-  font-weight: 500;
+  font-weight: 600;
+  font-size: var(--font-size-caption);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--surface-alt);
+}
+
+.wa-settings-table-wrap .wa-settings-table {
+  border: none;
+}
+
+.wa-settings-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.wa-settings-table tbody tr {
+  transition: background var(--transition-fast);
+}
+
+.wa-settings-table tbody tr:hover {
+  background: var(--surface-alt);
+}
+
+/* Search + filter toolbar, shared across every Settings table (Users,
+   Offices, Roles, Bot Config menus/triggers) — modern-look ask:
+   a pill-style search field plus compact filter selects, wrapping onto
+   their own lines on narrow screens rather than overflowing. */
+.wa-settings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.wa-settings-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 220px;
+  min-width: 180px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--surface-default);
+  color: var(--text-muted);
+}
+
+.wa-settings-search:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 20%, transparent);
+}
+
+.wa-settings-search input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: var(--font-size-body);
+  font-family: var(--font-family-base);
+}
+
+.wa-settings-toolbar__select {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-default);
+  background: var(--surface-default);
+  color: var(--text-primary);
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-body-small);
+}
+
+@media (max-width: 640px) {
+  .wa-settings-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .wa-settings-search,
+  .wa-settings-toolbar__select {
+    width: 100%;
+  }
 }
 
 .wa-settings-form {
@@ -114,4 +198,67 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+/* Responsive admin tables (Offices/Users/Roles/Bot Config) — below
+   640px a plain HTML table with `overflow-x: auto` forces sideways
+   scrolling and tiny text, which doesn't read as "modern" or "mobile
+   app-like." Below that width each row reflows into its own card
+   instead: the header row is hidden, and every cell shows its own
+   column name (from `data-label`) next to its value. Opt-in via
+   `.wa-settings-table--responsive` (added alongside `.wa-settings-table`)
+   so a table can adopt this without every `<td>` needing a `data-label`
+   on day one. */
+@media (max-width: 640px) {
+  /* Each row already draws its own card border/radius below — the
+     surrounding wrap's own border would otherwise double up around it. */
+  .wa-settings-table-wrap:has(.wa-settings-table--responsive) {
+    border: none;
+  }
+
+  .wa-settings-table--responsive thead {
+    display: none;
+  }
+
+  .wa-settings-table--responsive,
+  .wa-settings-table--responsive tbody,
+  .wa-settings-table--responsive tr,
+  .wa-settings-table--responsive td {
+    display: block;
+    width: 100%;
+  }
+
+  .wa-settings-table--responsive tr {
+    margin-bottom: var(--space-3);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .wa-settings-table--responsive tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .wa-settings-table--responsive td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    border-bottom: none;
+    padding: var(--space-1) 0;
+    white-space: normal;
+  }
+
+  .wa-settings-table--responsive td[data-label]:not([data-label='']):not([data-label=' '])::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  /* An action-only cell (empty data-label, e.g. the trailing "Edit"
+     column) gets its button right-aligned instead of a phantom label. */
+  .wa-settings-table--responsive td[data-label=''] {
+    justify-content: flex-end;
+  }
 }

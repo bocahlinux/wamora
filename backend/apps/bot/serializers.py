@@ -86,6 +86,6 @@ class BotConfigSerializer(serializers.ModelSerializer):
         model = BotConfig
         fields = [
             'id', 'office', 'enabled', 'fallback_message', 'session_completed_message', 'root_menu',
-            'list_footer_text', 'list_button_text', 'created_at', 'updated_at',
+            'list_footer_text', 'list_button_text', 'reply_delay_seconds', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']

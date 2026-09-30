@@ -40,3 +40,27 @@ def can_view_campaign(user, campaign) -> bool:
     for a single already-fetched campaign (detail/submit/approve/
     reject/resolve), so there is exactly one rule, not two."""
     return campaigns_visible_to(user).filter(pk=campaign.pk).exists()
+
+
+def templates_visible_to(user):
+    """Same office-boundary shape as `campaigns_visible_to`, for
+    `BlastTemplate`: a globally-accessing user sees every template; an
+    Office-bound user sees their own Office's templates PLUS every
+    global (`office__isnull=True`) template, since a global template is
+    explicitly meant to be shared/reused by every Office (see
+    `BlastTemplate.office`'s own docstring)."""
+    from django.db.models import Q
+
+    from .models import BlastTemplate
+
+    if has_global_access(user):
+        return BlastTemplate.objects.all()
+
+    office = get_user_office(user)
+    if office is None:
+        return BlastTemplate.objects.filter(office__isnull=True)
+    return BlastTemplate.objects.filter(Q(office=office) | Q(office__isnull=True))
+
+
+def can_view_template(user, template) -> bool:
+    return templates_visible_to(user).filter(pk=template.pk).exists()

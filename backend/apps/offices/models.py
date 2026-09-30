@@ -79,13 +79,41 @@ class Role(TimeStampedModel):
     deleting a Role that's still assigned to a user must be an explicit,
     deliberate action (reassign or clear it first), matching this
     project's existing convention for every other required-looking FK
-    (see `OfficeMembership.office`/`.user` below)."""
+    (see `OfficeMembership.office`/`.user` below).
+
+    Discussed requirement — Menu Access: `visible_menu_items`, a THIRD,
+    independent axis from `scopes`. `scopes` still governs actual API
+    authorization (unchanged); `visible_menu_items` governs ONLY whether
+    the frontend Sidebar renders a given menu item for this Role — a
+    UX-layer override, same "hiding an item never replaces the server-
+    side check" caveat `Sidebar.tsx` already documents for its scope-
+    based gating.
+
+    Three-way, `null`-vs-`[]` distinction, deliberately NOT collapsed
+    into one "empty means default" rule:
+      - `null` (the default, and every pre-existing Role's value after
+        this field was added) — "not customized": the frontend falls
+        back to its own existing scope/has_global_access/is_superuser-
+        derived default visibility per item, so adding this field
+        changes NOTHING for any Role until a Superadmin explicitly saves
+        a customization for it.
+      - `[]` — a deliberate, explicit "show nothing": a Superadmin who
+        actually wants to hide every sidebar item for a Role must be
+        able to express that; collapsing this into the same meaning as
+        `null` ("use the default instead") would make that intent
+        unrepresentable.
+      - A non-empty list — a strict allowlist: ONLY the keys present are
+        shown, regardless of scopes — validated against
+        `apps.offices.menu_items.MENU_ITEM_KEYS` by `RoleSerializer`,
+        the same "never a freeform value" discipline `scopes` already
+        follows against `settings.JWT_SCOPES`."""
 
     name = models.CharField(max_length=100, unique=True)
     scopes = models.JSONField(default=list, blank=True)
     grants_global_access = models.BooleanField(default=False)
     is_office_admin = models.BooleanField(default=False)
     is_operator = models.BooleanField(default=False)
+    visible_menu_items = models.JSONField(null=True, blank=True, default=None)
 
     def __str__(self):
         return self.name

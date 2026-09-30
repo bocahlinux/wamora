@@ -551,3 +551,72 @@ class ListMenuTestCase(ConversationEngineTestCase):
         self.assertEqual(chat.office, office_a)
         session = ConversationSession.objects.get(chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR)
         self.assertEqual(session.office, office_a)
+
+
+class ReplyDelayTests(ConversationEngineTestCase):
+    """Discussed requirement — human-like reply delay
+    (`BotConfig.reply_delay_seconds`). `reply_delay_seconds=0` (this test
+    case's own `setUp`, inherited unchanged) must be byte-for-byte the
+    original immediate-send behavior — covered by every other test class
+    in this file already calling `send_blast_message`/`send_list_message`
+    directly. These tests cover the `> 0` branch: `_send`/`_send_list`
+    must hand off to `apps.chats.tasks` instead of calling those
+    functions directly."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.reply_delay_seconds = 7
+        self.config.save(update_fields=['reply_delay_seconds'])
+
+    @mock.patch('apps.chats.tasks.send_bot_text_reply_task.delay')
+    @mock.patch('apps.chats.conversation_engine.send_blast_message')
+    def test_delayed_text_reply_never_calls_send_blast_message_directly(self, mocked_send, mocked_task_delay):
+        chat = self._chat()
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Info', trigger_value='9',
+            action_type=BotMenuItem.ACTION_SEND_TEXT, text='Info jam operasional.',
+        )
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+        handle_conversation_message(self.session, self._inbound(chat, '9', 'm2'))
+
+        mocked_send.assert_not_called()
+        self.assertTrue(mocked_task_delay.called)
+
+    @mock.patch('apps.chats.tasks.send_bot_text_reply_task.delay')
+    def test_delayed_text_reply_is_scheduled_with_the_configured_delay(self, mocked_task_delay):
+        chat = self._chat()
+        BotMenuItem.objects.create(
+            menu=self.root_menu, label='Info', trigger_value='9',
+            action_type=BotMenuItem.ACTION_SEND_TEXT, text='Info jam operasional.',
+        )
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+        mocked_task_delay.reset_mock()
+
+        handle_conversation_message(self.session, self._inbound(chat, '9', 'm2'))
+
+        args = mocked_task_delay.call_args_list[0][0]
+        self.assertEqual(args[0], self.session.name)
+        self.assertEqual(args[1], chat.provider_chat_id)
+        self.assertEqual(args[3], 'Info jam operasional.')
+        self.assertEqual(args[4], 7)
+
+    @mock.patch('apps.chats.tasks.send_bot_list_reply_task.delay')
+    @mock.patch('apps.chats.conversation_engine.send_list_message')
+    def test_delayed_menu_reply_never_calls_send_list_message_directly(self, mocked_send_list, mocked_task_delay):
+        chat = self._chat()
+        handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+        mocked_send_list.assert_not_called()
+        self.assertTrue(mocked_task_delay.called)
+
+    def test_zero_delay_is_unaffected_original_behavior(self):
+        # Sanity companion to the two tests above — restoring delay to 0
+        # on this same config must go straight back to the original,
+        # immediate, non-Celery path (every other test class in this file
+        # already exercises this; this just confirms toggling the field
+        # back off actually takes effect, not just its default value).
+        self.config.reply_delay_seconds = 0
+        self.config.save(update_fields=['reply_delay_seconds'])
+        chat = self._chat()
+        with mock.patch('apps.chats.conversation_engine.send_list_message') as mocked_send_list:
+            handle_conversation_message(self.session, self._inbound(chat, 'Halo', 'm1'))
+        mocked_send_list.assert_called_once()

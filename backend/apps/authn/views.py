@@ -154,6 +154,21 @@ class MeView(APIView):
                 'grants_global_access': membership.role.grants_global_access,
                 'is_office_admin': membership.role.is_office_admin,
                 'is_operator': membership.role.is_operator,
+                # Discussed requirement — Menu Access. Raw, unresolved
+                # value: `null` means "not customized" (frontend Sidebar
+                # falls back to its own existing scope/has_global_access-
+                # derived default visibility per item); `[]` means
+                # "show nothing" (a deliberate, explicit choice — see
+                # Role's own docstring for why this isn't collapsed into
+                # the same meaning as `null`); a non-empty list is a
+                # strict allowlist of `apps.offices.menu_items
+                # .MENU_ITEM_KEYS` values. Left for the frontend to
+                # interpret (same "backend hands over data, frontend owns
+                # the fallback rule" split as `scopes` -> Sidebar's own
+                # requiredScope checks) rather than resolved here, since
+                # resolving it would require this endpoint to know the
+                # frontend's own route/menu structure.
+                'visible_menu_items': membership.role.visible_menu_items,
             } if membership else None,
             # Step 14 (Operator assignment & availability foundation) —
             # the smallest addition needed for the frontend to render the

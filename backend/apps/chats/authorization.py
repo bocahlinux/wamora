@@ -42,16 +42,37 @@ def chats_visible_to(user):
     that history must stay Palangka Raya's forever, just never bleed into
     Kasongan's — this is the other half of that same guarantee.
     `.distinct()` because the `messages__office` join can otherwise
-    return the same Chat once per matching Message row."""
-    from .models import Chat
+    return the same Chat once per matching Message row.
+
+    Discussed requirement — a Blast message must never create a new,
+    visible Inbox conversation for anyone (Superadmin/Global Admin/
+    Office Admin/Operator alike). Every genuine Inbox conversation in
+    this system already originates from the citizen messaging first (the
+    1:1 composer can only reply to an already-`waiting_for_operator`
+    chat, never cold-start one) — so gating on "at least one real inbound
+    Message exists" hides a blast-only Chat with no legitimate reply yet,
+    with no blast-specific flag anywhere, and applies identically in
+    BOTH branches below (the `has_global_access` branch previously
+    returned every Chat unfiltered — that needed the same rule, not just
+    the Office-scoped one)."""
+    from .models import Chat, Message
 
     if has_global_access(user):
-        return Chat.objects.all()
+        return Chat.objects.filter(messages__direction=Message.DIRECTION_INBOUND).distinct()
 
     office = get_user_office(user)
     if office is None:
         return Chat.objects.none()
-    return Chat.objects.filter(Q(office=office) | Q(messages__office=office)).distinct()
+    # Two chained `.filter()` calls, deliberately NOT one call with both
+    # conditions together — Django's "spanning multi-valued relationships"
+    # rule would otherwise force both conditions onto the SAME joined
+    # Message row (requiring the office-matching message to also be the
+    # inbound one). Chaining keeps them independent existence checks: any
+    # message satisfying the office rule, and (possibly a different)
+    # message that is inbound.
+    return Chat.objects.filter(Q(office=office) | Q(messages__office=office)).filter(
+        messages__direction=Message.DIRECTION_INBOUND
+    ).distinct()
 
 
 def can_view_chat(user, chat) -> bool:

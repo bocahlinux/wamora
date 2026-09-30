@@ -1,0 +1,115 @@
+.wa-account-menu {
+  position: relative;
+}
+
+.wa-account-menu__trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: none;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.wa-account-menu__trigger:hover {
+  background: var(--surface-alt);
+}
+
+.wa-account-menu__trigger:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.wa-account-menu__avatar {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--color-primary-400), var(--color-blue-500));
+  color: #ffffff;
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+}
+
+.wa-account-menu__name {
+  font-size: var(--font-size-body-small);
+  font-weight: 500;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wa-account-menu__chevron {
+  color: var(--text-muted);
+  transition: transform var(--transition-fast);
+}
+
+.wa-account-menu__chevron--open {
+  transform: rotate(180deg);
+}
+
+.wa-account-menu__panel {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  min-width: 180px;
+  background: var(--surface-default);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-1);
+  z-index: 60;
+  animation: wa-account-menu-in var(--transition-fast);
+}
+
+.wa-account-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  font-size: var(--font-size-body-small);
+  color: var(--text-primary);
+  text-decoration: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.wa-account-menu__item:hover {
+  background: var(--surface-alt);
+}
+
+.wa-account-menu__item--danger:hover {
+  background: color-mix(in srgb, var(--color-error) 12%, transparent);
+  color: var(--color-error);
+}
+
+@keyframes wa-account-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@media (max-width: 640px) {
+  .wa-account-menu__name {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wa-account-menu__panel {
+    animation: none;
+  }
+}

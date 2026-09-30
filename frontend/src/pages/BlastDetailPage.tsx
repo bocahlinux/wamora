@@ -47,6 +47,7 @@ const RECIPIENT_STATUS_LABEL: Record<BlastRecipientStatus, string> = {
   sent: 'Sent',
   failed: 'Failed',
   skipped: 'Skipped',
+  invalid_number: 'Invalid number',
 };
 
 function formatTimestamp(value: string | null): string {
@@ -57,7 +58,9 @@ function formatTimestamp(value: string | null): string {
 // endpoint already returns (serializers.py's BlastRecipientSerializer) —
 // not a fabricated progress bar (task Section 5's explicit constraint).
 function countByStatus(campaign: BlastCampaignDetail): Record<BlastRecipientStatus, number> {
-  const counts: Record<BlastRecipientStatus, number> = { pending: 0, sending: 0, sent: 0, failed: 0, skipped: 0 };
+  const counts: Record<BlastRecipientStatus, number> = {
+    pending: 0, sending: 0, sent: 0, failed: 0, skipped: 0, invalid_number: 0,
+  };
   for (const recipient of campaign.recipients) {
     counts[recipient.status] += 1;
   }
@@ -333,7 +336,7 @@ export function BlastDetailPage() {
             </div>
 
             <div className="wa-blast-recipients__wrap">
-              <table className="wa-blast-recipients">
+              <table className="wa-blast-recipients wa-table wa-table--responsive">
                 <thead>
                   <tr>
                     <th>Destination</th>
@@ -347,18 +350,18 @@ export function BlastDetailPage() {
                 <tbody>
                   {campaign.recipients.map((recipient) => (
                     <tr key={recipient.id}>
-                      <td>{recipient.destination}</td>
-                      <td>
+                      <td data-label="Destination">{recipient.destination}</td>
+                      <td data-label="Status">
                         <StatusBadge
                           status={mapBlastRecipientStatus(recipient.status)}
                           label={RECIPIENT_STATUS_LABEL[recipient.status]}
                         />
                       </td>
-                      <td>{formatTimestamp(recipient.scheduled_for)}</td>
-                      <td>{formatTimestamp(recipient.sent_at)}</td>
-                      <td className="wa-blast-recipients__failure">{recipient.failure_reason || '—'}</td>
+                      <td data-label="Scheduled for">{formatTimestamp(recipient.scheduled_for)}</td>
+                      <td data-label="Sent at">{formatTimestamp(recipient.sent_at)}</td>
+                      <td data-label="Failure reason" className="wa-blast-recipients__failure">{recipient.failure_reason || '—'}</td>
                       {canRecover ? (
-                        <td className="wa-blast-recipients__recovery">
+                        <td data-label="Recovery" className="wa-blast-recipients__recovery">
                           {recipient.status === 'sending' ? (
                             <div className="wa-blast-recipients__recovery-actions">
                               <Button

@@ -1,6 +1,6 @@
 import { authHeader } from './auth';
 import { config } from './config';
-import { request } from './api';
+import { request, type ApiResult } from './api';
 
 export interface ComponentHealth {
   status: string;
@@ -45,6 +45,11 @@ export interface RoleSummary {
   grants_global_access: boolean;
   is_office_admin: boolean;
   is_operator: boolean;
+  /** Discussed requirement — Menu Access (lib/menuItems.ts). `null` =
+   * not customized (Sidebar falls back to its own scope/has_global_access-
+   * derived default visibility per item); `[]` = deliberately show
+   * nothing; a non-empty list = a strict allowlist of menu item keys. */
+  visible_menu_items: string[] | null;
 }
 
 /** Step 4/6 (Office <-> Blast/Settings integration) — `office` is `null`
@@ -426,7 +431,17 @@ export type BlastCampaignStatus =
   | 'rejected'
   | 'failed';
 
-export type BlastRecipientStatus = 'pending' | 'sending' | 'sent' | 'failed' | 'skipped';
+// Discussed requirement — Blast Templates + per-recipient variables +
+// External API. `invalid_number` is a new terminal BlastRecipient status
+// (models.py's STATUS_INVALID_NUMBER) for a number confirmed NOT to be
+// on WhatsApp, checked before a send is ever attempted — distinct from
+// `failed` (a send was attempted and failed). `template`/`source` on the
+// campaign shapes and `variables` on the recipient shape are all
+// additive (serializers.py's BlastCampaignListSerializer.get_template/
+// get_source, BlastRecipientSerializer's `variables` field).
+export type BlastRecipientStatus = 'pending' | 'sending' | 'sent' | 'failed' | 'skipped' | 'invalid_number';
+
+export type BlastCampaignSource = 'dashboard' | 'api';
 
 export interface BlastRecipient {
   id: number;
@@ -435,6 +450,7 @@ export interface BlastRecipient {
   scheduled_for: string | null;
   sent_at: string | null;
   failure_reason: string;
+  variables: Record<string, string>;
 }
 
 export interface BlastCampaignListItem {
@@ -451,6 +467,11 @@ export interface BlastCampaignListItem {
   /** Step 4 (Blast <-> Office integration) — `null` for a legacy campaign
    * created before Office was introduced (no backfill was performed). */
   office: { id: number; name: string } | null;
+  /** `null` for a freeform campaign never created from a template. */
+  template: { id: number; key: string; name: string } | null;
+  /** 'api' when `triggered_by_api_key` is set (an external-system-
+   * triggered, auto-approved campaign), 'dashboard' otherwise. */
+  source: BlastCampaignSource;
 }
 
 export interface BlastCampaignDetail extends BlastCampaignListItem {
@@ -476,17 +497,49 @@ export function getBlastCampaign(id: number) {
   });
 }
 
+/** A per-recipient row for the template path — `destination` plus every
+ * `{{variable}}` the chosen template declares (serializers.py's
+ * `validate()`: ANY row missing/mismatching a variable rejects the
+ * WHOLE request, never a partial create). */
+export interface BlastRecipientInput {
+  destination: string;
+  variables: Record<string, string>;
+}
+
 export interface CreateBlastCampaignInput {
   session: string;
   name: string;
-  message_template: string;
-  recipients: string[];
+  /** Required for the freeform path (no `template`); ignored server-side
+   * (overwritten with the template's own content) when `template` is
+   * given — see serializers.py's `validate()`. */
+  message_template?: string;
+  /** Bare destination strings (freeform, additive/original path) OR
+   * `{destination, variables}` objects (required once `template` is
+   * set) — never mixed within one request in practice, but the type
+   * itself allows either shape per item, matching the backend's own
+   * mixed-shape `ListField`. */
+  recipients: Array<string | BlastRecipientInput>;
+  /** Discussed requirement — Blast Templates. When set, `content` is
+   * snapshotted server-side into `message_template`; every recipient
+   * must then be a `BlastRecipientInput` carrying exactly this
+   * template's declared variables. */
+  template?: number;
   /** Step 4 (Blast <-> Office integration) — only meaningful for a
    * globally-accessing user (Superadmin/Global Admin), who must pick an
    * Office explicitly. For everyone else the backend ignores whatever is
    * sent here and forces the caller's own Office (serializers.py
    * validate()) — so this is omitted entirely for non-global users. */
   office?: number;
+}
+
+/** The all-or-nothing per-row validation failure shape
+ * (serializers.py's `validate()`: `{recipients: str, details: [...]}`,
+ * surfaced by `lib/api.ts` as an ApiError with this as `.details`). */
+export interface BlastRecipientValidationDetail {
+  index: number;
+  destination: string;
+  missing: string[];
+  extra: string[];
 }
 
 /** POST /api/blast/campaigns/ — creates a `draft` campaign (requires the
@@ -580,6 +633,204 @@ export function resolveBlastRecipient(campaignId: number, recipientId: number, s
 }
 
 // ---------------------------------------------------------------------
+// Blast Templates + API Keys + Settings + History — Discussed
+// requirement (vehicle-tax due-date reminders). All mounted under
+// /api/blast/ alongside campaigns above (apps/blast/urls.py), same
+// JWTAuthentication trust boundary.
+
+export interface BlastTemplate {
+  id: number;
+  key: string;
+  name: string;
+  content: string;
+  /** Derived server-side from `content` (apps.blast.templating.
+   * extract_variable_names) — never a second, hand-maintained copy. */
+  variable_names: string[];
+  /** `null` = a shared/global template, usable by every Office. */
+  office: number | null;
+  is_active: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/blast/templates/ — readable by 'blast' or 'system
+ * administration', office-scoped (own Office's templates + every global
+ * one) unless the caller is globally-accessing (apps.blast.authorization.
+ * templates_visible_to). */
+export function getBlastTemplates() {
+  return request<BlastTemplate[]>(`${config.djangoBaseUrl}/api/blast/templates/`, {
+    headers: authHeader(),
+  });
+}
+
+export interface CreateBlastTemplateInput {
+  key: string;
+  name: string;
+  content: string;
+  /** Only meaningful for a globally-accessing user, who may explicitly
+   * create a shared/global template (`office: null`) or scope it to one
+   * Office. Ignored/overwritten server-side for everyone else, who
+   * always gets their own Office forced (views.py's
+   * BlastTemplateListCreateView.post). */
+  office?: number | null;
+}
+
+/** POST /api/blast/templates/ — requires 'blast'. */
+export function createBlastTemplate(input: CreateBlastTemplateInput) {
+  return request<BlastTemplate>(`${config.djangoBaseUrl}/api/blast/templates/`, {
+    method: 'POST',
+    body: input,
+    headers: authHeader(),
+  });
+}
+
+/** PATCH /api/blast/templates/:id/ — `key` is stable-by-design and
+ * silently ignored server-side even if sent (views.py's
+ * BlastTemplateDetailView.patch); every other field may change freely.
+ * No DELETE — retire a template via `is_active: false` instead (same
+ * "revoke, never hard-delete" convention as BlastApiKey below). */
+export function updateBlastTemplate(id: number, input: Partial<Omit<CreateBlastTemplateInput, 'key'>> & { is_active?: boolean }) {
+  return request<BlastTemplate>(`${config.djangoBaseUrl}/api/blast/templates/${id}/`, {
+    method: 'PATCH',
+    body: input,
+    headers: authHeader(),
+  });
+}
+
+/** List-shape for GET /api/blast/api-keys/ — never includes the raw key
+ * (shown exactly once, only in CreateBlastApiKeyResult below).
+ * Discussed requirement — a key is GLOBAL and carries no Office at all
+ * (works for any session named in each external request — see
+ * apps.blast.models.BlastApiKey's own docstring). */
+export interface BlastApiKey {
+  id: number;
+  name: string;
+  key_prefix: string;
+  is_active: boolean;
+  created_by: string;
+  last_used_at: string | null;
+  created_at: string;
+}
+
+/** GET /api/blast/api-keys/ — Superadmin/Global-Admin-only (403
+ * otherwise), same gating precedent as the Roles tab. */
+export function getBlastApiKeys() {
+  return request<BlastApiKey[]>(`${config.djangoBaseUrl}/api/blast/api-keys/`, {
+    headers: authHeader(),
+  });
+}
+
+export interface CreateBlastApiKeyResult {
+  id: number;
+  name: string;
+  key_prefix: string;
+  is_active: boolean;
+  /** Shown exactly once, in THIS response only — never retrievable
+   * again afterward (apps.blast.models.BlastApiKey's own docstring). */
+  raw_key: string;
+}
+
+/** POST /api/blast/api-keys/ — creates a new external-API credential.
+ * Global by design: works for a single ad-hoc message, a freeform
+ * blast, or a templated blast, against ANY session named in each
+ * request. */
+export function createBlastApiKey(name: string) {
+  return request<CreateBlastApiKeyResult>(`${config.djangoBaseUrl}/api/blast/api-keys/`, {
+    method: 'POST',
+    body: { name },
+    headers: authHeader(),
+  });
+}
+
+/** POST /api/blast/api-keys/:id/revoke/ — `is_active: false`, never a
+ * hard delete (past campaigns stay attributable to a revoked key). */
+export function revokeBlastApiKey(id: number) {
+  return request<void>(`${config.djangoBaseUrl}/api/blast/api-keys/${id}/revoke/`, {
+    method: 'POST',
+    headers: authHeader(),
+  });
+}
+
+export interface BlastSettings {
+  inter_message_delay_seconds: number;
+}
+
+/** GET /api/blast/settings/ — the one-row dynamic-delay singleton,
+ * Superadmin/Global-Admin-only. Applies to EVERY campaign (dashboard and
+ * API-triggered alike) — a single setting, not two. */
+export function getBlastSettings() {
+  return request<BlastSettings>(`${config.djangoBaseUrl}/api/blast/settings/`, {
+    headers: authHeader(),
+  });
+}
+
+export function updateBlastSettings(inter_message_delay_seconds: number) {
+  return request<BlastSettings>(`${config.djangoBaseUrl}/api/blast/settings/`, {
+    method: 'PATCH',
+    body: { inter_message_delay_seconds },
+    headers: authHeader(),
+  });
+}
+
+/** One flattened row of GET /api/blast/history/ — a BlastRecipient
+ * across ANY campaign, with just enough of its parent campaign inlined
+ * for the History table's columns/filters (views.py's BlastHistoryView).
+ * This — never the Inbox — is where a blast message's outcome is
+ * actually visible/auditable (Discussed requirement). */
+export interface BlastHistoryItem {
+  id: number;
+  destination: string;
+  status: BlastRecipientStatus;
+  failure_reason: string;
+  variables: Record<string, string>;
+  sent_at: string | null;
+  created_at: string;
+  campaign: {
+    id: number;
+    name: string;
+    office: { id: number; name: string } | null;
+    template: { id: number; name: string } | null;
+    source: BlastCampaignSource;
+  };
+}
+
+export interface BlastHistoryQuery {
+  search?: string;
+  status?: BlastRecipientStatus;
+  /** Superadmin/Global Admin only — ignored server-side otherwise (an
+   * Office-scoped caller is already limited to their own Office). */
+  office?: number;
+  template?: number;
+  source?: BlastCampaignSource;
+  date_from?: string;
+  date_to?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface BlastHistoryResponse {
+  count: number;
+  num_pages: number;
+  page: number;
+  results: BlastHistoryItem[];
+}
+
+/** GET /api/blast/history/ — server-side paginated + filterable, the
+ * same PageNumberPagination-style envelope shape already established
+ * for e.g. GET /api/chats/ (ChatListView). */
+export function getBlastHistory(query: BlastHistoryQuery = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== '') params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return request<BlastHistoryResponse>(`${config.djangoBaseUrl}/api/blast/history/${qs ? `?${qs}` : ''}`, {
+    headers: authHeader(),
+  });
+}
+
+// ---------------------------------------------------------------------
 // Step 6 — Office & User management (apps/offices/views.py). Only
 // reachable server-side by a globally-accessing administrator
 // (Superadmin/Global Admin, for Office management) or an admin with the
@@ -598,7 +849,12 @@ export interface Office {
   updated_at: string;
 }
 
-/** GET /api/offices/ — every Office, active and inactive (OfficeListCreateView). */
+/** GET /api/offices/ — every Office, active and inactive (OfficeListCreateView).
+ * Deliberately NOT server-side paginated, unlike `getUsers` — Offices is
+ * a small, slow-growing catalog reused as a FULL-list dropdown source by
+ * several other forms (User form's Office picker, Blast/Inbox-config/
+ * Bot-config Office pickers); paginating it would break every one of
+ * those. */
 export function getOffices() {
   return request<Office[]>(`${config.djangoBaseUrl}/api/offices/`, { headers: authHeader() });
 }
@@ -684,11 +940,55 @@ export interface AdminUser {
   date_joined: string;
 }
 
-/** GET /api/users/ — every user visible to the caller's admin scope:
- * all of them for Superadmin/Global Admin, only the caller's own
- * Office's users for an Office Admin (UserListCreateView). */
-export function getUsers() {
-  return request<AdminUser[]>(`${config.djangoBaseUrl}/api/users/`, { headers: authHeader() });
+/** GET /api/users/ — users visible to the caller's admin scope: all of
+ * them for Superadmin/Global Admin, only the caller's own Office's users
+ * for an Office Admin (UserListCreateView). Server-side paginated (DRF
+ * `PageNumberPagination`, same envelope `getChats` already uses) — the
+ * one Settings admin table that can realistically grow large.
+ * `Offices`/`Roles` deliberately stay unpaginated (see their own
+ * comments) since other forms need their FULL list as dropdown data. For
+ * a call site that genuinely needs every User too (InboxPage.tsx's
+ * cross-Office transfer picker), use `getAllUsers()` below instead of
+ * calling this directly. */
+export interface UsersQuery {
+  page?: number;
+  /** Case-insensitive substring match against username/first_name/last_name
+   * (`UserListCreateView.get`'s own `search` param). */
+  search?: string;
+  /** An Office id. */
+  office?: number;
+  /** A Role id. */
+  role?: number;
+  isActive?: boolean;
+}
+
+export function getUsers(query: UsersQuery = {}) {
+  const params = new URLSearchParams();
+  params.set('page', String(query.page ?? 1));
+  if (query.search) params.set('search', query.search);
+  if (query.office != null) params.set('office', String(query.office));
+  if (query.role != null) params.set('role', String(query.role));
+  if (query.isActive != null) params.set('is_active', String(query.isActive));
+  return request<PaginatedResponse<AdminUser>>(`${config.djangoBaseUrl}/api/users/?${params.toString()}`, {
+    headers: authHeader(),
+  });
+}
+
+/** Loops `getUsers()` across every page and concatenates — for the rare
+ * picker use case that needs the FULL user list client-side (unlike a
+ * display table, which should always show one page at a time via
+ * `getUsers(page)` directly). Not used by SettingsUsersPanel.tsx. */
+export async function getAllUsers(): Promise<ApiResult<AdminUser[]>> {
+  const all: AdminUser[] = [];
+  let page = 1;
+  for (;;) {
+    const result = await getUsers({ page });
+    if (!result.ok) return result;
+    all.push(...result.data.results);
+    if (!result.data.next) break;
+    page += 1;
+  }
+  return { ok: true, data: all };
 }
 
 export function getUser(id: number) {
@@ -800,6 +1100,9 @@ export interface Role extends RoleSummary {
   updated_at: string;
 }
 
+/** Deliberately NOT server-side paginated, same reasoning as `getOffices`
+ * — the User form's own Role picker (SettingsUsersPanel.tsx) needs the
+ * FULL catalog, not one page of it. */
 export function getRoles() {
   return request<Role[]>(`${config.djangoBaseUrl}/api/roles/`, { headers: authHeader() });
 }
@@ -810,6 +1113,12 @@ export interface RoleInput {
   grants_global_access?: boolean;
   is_office_admin?: boolean;
   is_operator?: boolean;
+  /** Discussed requirement — Menu Access. Omitted/undefined leaves the
+   * existing value untouched (PATCH semantics); `null` explicitly resets
+   * back to "not customized"; `[]` or a list sets an explicit override —
+   * see `RoleSummary.visible_menu_items`'s own comment for the meaning
+   * of each. */
+  visible_menu_items?: string[] | null;
 }
 
 export function createRole(input: RoleInput) {
@@ -858,6 +1167,11 @@ export interface BotConfig {
    * server-side to "Pilih" if left blank. */
   list_footer_text: string;
   list_button_text: string;
+  /** Discussed requirement — human-like reply delay. `0` (default) sends
+   * immediately, exactly as before this field existed. A positive value
+   * (seconds) makes the bot show WhatsApp's "typing…" indicator for that
+   * long before actually sending each automated reply. */
+  reply_delay_seconds: number;
   created_at: string;
   updated_at: string;
 }
@@ -873,7 +1187,13 @@ export function getBotConfig(officeId?: number) {
 export type UpdateBotConfigInput = Partial<
   Pick<
     BotConfig,
-    'enabled' | 'fallback_message' | 'session_completed_message' | 'root_menu' | 'list_footer_text' | 'list_button_text'
+    | 'enabled'
+    | 'fallback_message'
+    | 'session_completed_message'
+    | 'root_menu'
+    | 'list_footer_text'
+    | 'list_button_text'
+    | 'reply_delay_seconds'
   >
 >;
 

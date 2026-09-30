@@ -210,7 +210,7 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._superadmin()
         self.client.post('/api/users/', self._create_payload(initial='RD'), format='json', **self._auth_header(actor))
         response = self.client.get('/api/users/', **self._auth_header(actor))
-        row = next(r for r in response.data if r['username'] == 'newuser')
+        row = next(r for r in response.data['results'] if r['username'] == 'newuser')
         self.assertEqual(row['initial'], 'RD')
 
     def test_creating_a_user_without_an_initial_is_rejected(self):
@@ -337,9 +337,68 @@ class UserManagementApiTests(OfficesUsersApiTestCase):
         actor = self._office_admin('officeadmin_a2', self.office_a)
         response = self.client.get('/api/users/', **self._auth_header(actor))
         self.assertEqual(response.status_code, 200)
-        usernames = {row['username'] for row in response.data}
+        usernames = {row['username'] for row in response.data['results']}
         self.assertIn('operator_a', usernames)
         self.assertNotIn('operator_b', usernames)
+
+    def test_pagination_respects_page_size(self):
+        # Same PageNumberPagination envelope/page size (settings.REST_FRAMEWORK
+        # PAGE_SIZE=20) apps.chats.views.ChatListView already established —
+        # confirmed here rather than assumed, since this is the first time
+        # this endpoint's own response shape changed from a bare list.
+        actor = self._superadmin()
+        for i in range(25):
+            self._user(f'bulk_user_{i}')
+        response = self.client.get('/api/users/', **self._auth_header(actor))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['results']), 20)
+        self.assertEqual(response.data['count'], 25)
+        self.assertIsNotNone(response.data['next'])
+
+    def test_search_matches_username_case_insensitive_substring(self):
+        actor = self._superadmin()
+        self._user('kasongan_operator')
+        self._user('palangka_operator')
+        response = self.client.get('/api/users/?search=KASONGAN', **self._auth_header(actor))
+        usernames = {row['username'] for row in response.data['results']}
+        self.assertEqual(usernames, {'kasongan_operator'})
+
+    def test_search_matches_first_or_last_name(self):
+        actor = self._superadmin()
+        user = self._user('someuser')
+        user.first_name = 'Budi'
+        user.save(update_fields=['first_name'])
+        response = self.client.get('/api/users/?search=budi', **self._auth_header(actor))
+        usernames = {row['username'] for row in response.data['results']}
+        self.assertIn('someuser', usernames)
+
+    def test_office_filter(self):
+        actor = self._superadmin()
+        self._office_admin('officeadmin_a', self.office_a)
+        self._office_admin('officeadmin_b', self.office_b)
+        response = self.client.get(f'/api/users/?office={self.office_a.pk}', **self._auth_header(actor))
+        usernames = {row['username'] for row in response.data['results']}
+        self.assertIn('officeadmin_a', usernames)
+        self.assertNotIn('officeadmin_b', usernames)
+
+    def test_role_filter(self):
+        actor = self._superadmin()
+        self._office_admin('officeadmin_a', self.office_a)
+        self._operator('operator_a', self.office_a)
+        response = self.client.get(f'/api/users/?role={self.role_operator.pk}', **self._auth_header(actor))
+        usernames = {row['username'] for row in response.data['results']}
+        self.assertIn('operator_a', usernames)
+        self.assertNotIn('officeadmin_a', usernames)
+
+    def test_is_active_filter(self):
+        actor = self._superadmin()
+        inactive = self._user('inactive_user')
+        inactive.is_active = False
+        inactive.save(update_fields=['is_active'])
+        active_response = self.client.get('/api/users/?is_active=true', **self._auth_header(actor))
+        inactive_response = self.client.get('/api/users/?is_active=false', **self._auth_header(actor))
+        self.assertNotIn('inactive_user', {row['username'] for row in active_response.data['results']})
+        self.assertIn('inactive_user', {row['username'] for row in inactive_response.data['results']})
 
     def test_office_admin_cannot_view_another_offices_user_detail(self):
         target = self._operator('operator_b', self.office_b)

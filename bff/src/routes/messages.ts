@@ -147,4 +147,42 @@ router.post('/sessions/:session/messages', requireAuth, requireScope('sending'),
   sendWahaUnavailable(res);
 });
 
+// Discussed requirement — Inbox composer typing indicator. Same
+// requireAuth/requireScope('sending')/validateSession boundary as the
+// send route above (an operator who can send a message may also show
+// "typing…" while composing one) — deliberately NOT idempotency-key- or
+// OutboundOperation-gated, unlike sendMessage above: a typing indicator
+// is ephemeral, fire-and-forget, nothing to deduplicate or track.
+router.post('/sessions/:session/typing/start', requireAuth, requireScope('sending'), async (req, res) => {
+  if (!validateSession(req, res)) return;
+  const { chatId } = req.body ?? {};
+  if (typeof chatId !== 'string' || !chatId) {
+    sendBadRequest(res, 'chatId is required');
+    return;
+  }
+  const result = await callWaha('startTyping', req.params.session, {
+    baseUrl: config.wahaBaseUrl,
+    apiKey: config.wahaApiKey,
+    timeoutMs: config.wahaTimeoutMs,
+    body: { chatId, session: req.params.session },
+  });
+  res.status(200).json({ ok: result.outcome === 'success' });
+});
+
+router.post('/sessions/:session/typing/stop', requireAuth, requireScope('sending'), async (req, res) => {
+  if (!validateSession(req, res)) return;
+  const { chatId } = req.body ?? {};
+  if (typeof chatId !== 'string' || !chatId) {
+    sendBadRequest(res, 'chatId is required');
+    return;
+  }
+  const result = await callWaha('stopTyping', req.params.session, {
+    baseUrl: config.wahaBaseUrl,
+    apiKey: config.wahaApiKey,
+    timeoutMs: config.wahaTimeoutMs,
+    body: { chatId, session: req.params.session },
+  });
+  res.status(200).json({ ok: result.outcome === 'success' });
+});
+
 export default router;

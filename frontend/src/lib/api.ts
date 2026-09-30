@@ -6,7 +6,7 @@
 // throw that a page would have to guess about.
 
 export type ApiError =
-  | { kind: 'validation'; message: string }
+  | { kind: 'validation'; message: string; details?: unknown }
   | { kind: 'unauthorized' }
   | { kind: 'forbidden' }
   | { kind: 'not_found' }
@@ -31,11 +31,16 @@ function errorForStatus(status: number, body: unknown): ApiError {
   if (status === 403) return { kind: 'forbidden' };
   if (status === 404) return { kind: 'not_found' };
   if (status === 400 || status === 409) {
-    const message =
-      (body && typeof body === 'object' && 'error' in body && typeof (body as Record<string, unknown>).error === 'object'
-        ? ((body as Record<string, unknown>).error as Record<string, unknown>).message
-        : undefined) ?? 'The request could not be processed.';
-    return { kind: 'validation', message: String(message) };
+    const errorBody =
+      body && typeof body === 'object' && 'error' in body && typeof (body as Record<string, unknown>).error === 'object'
+        ? ((body as Record<string, unknown>).error as Record<string, unknown>)
+        : undefined;
+    const message = errorBody?.message ?? 'The request could not be processed.';
+    // Additive — some endpoints (e.g. Blast's all-or-nothing per-recipient
+    // template-variable validation) attach a structured `details` array
+    // alongside `message`; every other caller that doesn't look for it is
+    // unaffected (it stays `undefined`).
+    return { kind: 'validation', message: String(message), ...(errorBody?.details !== undefined ? { details: errorBody.details } : {}) };
   }
   if (status >= 500) return { kind: 'server_error', status };
   return { kind: 'unknown', status };

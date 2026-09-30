@@ -69,58 +69,63 @@
   font-weight: 500;
 }
 
-.wa-sidebar__account {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border-top: 1px solid var(--border-default);
-}
-
-.wa-sidebar--collapsed .wa-sidebar__account {
-  justify-content: center;
-  padding: var(--space-3);
-}
-
-.wa-sidebar__account-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: var(--surface-alt);
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.wa-sidebar__account-info {
+/* Blast submenu (Campaigns/Templates/History) — the one expandable
+   NAV_ITEMS entry; every other sidebar item stays a plain .wa-sidebar__link,
+   untouched by these rules. */
+.wa-sidebar__group {
   display: flex;
   flex-direction: column;
-  min-width: 0;
 }
 
-.wa-sidebar__account-name {
-  font-size: var(--font-size-body-small);
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.wa-sidebar__logout {
-  background: none;
+.wa-sidebar__group-toggle {
+  width: 100%;
   border: none;
-  padding: 0;
-  font-size: var(--font-size-caption);
-  color: var(--text-muted);
+  background: none;
   cursor: pointer;
+  font: inherit;
+}
+
+.wa-sidebar__group-toggle span {
+  flex: 1;
   text-align: left;
 }
-.wa-sidebar__logout:hover {
-  color: var(--color-error);
-  text-decoration: underline;
+
+.wa-sidebar__group-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
 }
+
+.wa-sidebar__submenu {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) 0 var(--space-1) 32px;
+}
+
+.wa-sidebar__sublink {
+  display: flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: var(--font-size-body-small);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.wa-sidebar__sublink:hover {
+  background: var(--surface-alt);
+  color: var(--text-primary);
+}
+
+.wa-sidebar__sublink--active {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: var(--color-primary-600);
+  font-weight: 500;
+}
+
 
 .wa-sidebar-backdrop {
   display: none;

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Plus, Users } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Plus, Search, Users, X } from 'lucide-react';
 
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -9,9 +9,11 @@ import { ErrorState } from '../components/ui/ErrorState';
 import { Input } from '../components/ui/Input';
 import { LoadingState } from '../components/ui/LoadingState';
 import { Modal } from '../components/ui/Modal';
+import { Pagination } from '../components/ui/Pagination';
 import type { ApiError } from '../lib/api';
 import {
   createUser,
+  getUsers,
   updateUser,
   type AdminUser,
   type Me,
@@ -20,6 +22,16 @@ import {
 } from '../lib/djangoApi';
 import { useApiQuery } from '../lib/useApiQuery';
 import './SettingsPage.css';
+
+// settings.REST_FRAMEWORK['PAGE_SIZE'] (backend/config/settings.py) —
+// used only to compute "Page N of M" in the Pagination footer; the
+// actual page boundary is always whatever the server returned, never
+// re-derived from this constant.
+const DJANGO_PAGE_SIZE = 20;
+// Debounces the search box so a query fires once typing pauses, not on
+// every keystroke — same 300ms figure this project's other debounced
+// inputs use as a reasonable "feels instant, doesn't spam the API" value.
+const SEARCH_DEBOUNCE_MS = 300;
 
 // The Role merge — `role` is now the ONE field carrying both
 // organizational standing (Office-scoping/administrative authority) and
@@ -34,12 +46,10 @@ import './SettingsPage.css';
 // actual boundary regardless.
 export function SettingsUsersPanel({
   me,
-  users,
   offices,
   roles,
 }: {
   me: Me;
-  users: ReturnType<typeof useApiQuery<AdminUser[]>>;
   offices: Office[];
   /** The Role catalog — readable by Superadmin, Global Admin, AND Office
    * Admin (`RoleListCreateView.get`'s `_admin_scope` check), since even
@@ -51,6 +61,49 @@ export function SettingsUsersPanel({
   const canPickGlobalAdmin = me.has_global_access;
   const canPickOffice = me.has_global_access;
 
+  // Server-side search + filters — this table is paginated
+  // (UserListCreateView.get), so a client-side filter would only ever
+  // see the current page's rows and silently hide matches elsewhere.
+  const [page, setPage] = useState(1);
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  const [officeFilter, setOfficeFilter] = useState<number | ''>('');
+  const [roleFilter, setRoleFilter] = useState<number | ''>('');
+  const [activeFilter, setActiveFilter] = useState<'' | 'true' | 'false'>('');
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearch(searchInput.trim()), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  // Any filter change re-starts from page 1 — staying on e.g. page 3 of
+  // an old, now-irrelevant result set would just show an empty page.
+  useEffect(() => {
+    setPage(1);
+  }, [search, officeFilter, roleFilter, activeFilter]);
+
+  const users = useApiQuery(
+    () =>
+      getUsers({
+        page,
+        search: search || undefined,
+        office: officeFilter === '' ? undefined : officeFilter,
+        role: roleFilter === '' ? undefined : roleFilter,
+        isActive: activeFilter === '' ? undefined : activeFilter === 'true',
+      }),
+    [page, search, officeFilter, roleFilter, activeFilter],
+  );
+
+  const hasActiveFilters = search !== '' || officeFilter !== '' || roleFilter !== '' || activeFilter !== '';
+
+  function clearFilters() {
+    setSearchInput('');
+    setSearch('');
+    setOfficeFilter('');
+    setRoleFilter('');
+    setActiveFilter('');
+  }
+
   return (
     <Card>
       <div className="wa-settings-panel__header">
@@ -61,51 +114,123 @@ export function SettingsUsersPanel({
         </Button>
       </div>
 
+      <div className="wa-settings-toolbar">
+        <label className="wa-settings-search">
+          <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+          <input
+            type="text"
+            placeholder="Search username or name…"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            aria-label="Search users"
+          />
+        </label>
+        {offices.length > 0 ? (
+          <select
+            className="wa-settings-toolbar__select"
+            value={officeFilter}
+            onChange={(e) => setOfficeFilter(e.target.value ? Number(e.target.value) : '')}
+            aria-label="Filter by Office"
+          >
+            <option value="">All Offices</option>
+            {offices.map((office) => (
+              <option key={office.id} value={office.id}>
+                {office.name}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        <select
+          className="wa-settings-toolbar__select"
+          value={roleFilter}
+          onChange={(e) => setRoleFilter(e.target.value ? Number(e.target.value) : '')}
+          aria-label="Filter by Role"
+        >
+          <option value="">All Roles</option>
+          {roles.map((role) => (
+            <option key={role.id} value={role.id}>
+              {role.name}
+            </option>
+          ))}
+        </select>
+        <select
+          className="wa-settings-toolbar__select"
+          value={activeFilter}
+          onChange={(e) => setActiveFilter(e.target.value as '' | 'true' | 'false')}
+          aria-label="Filter by status"
+        >
+          <option value="">All statuses</option>
+          <option value="true">Active</option>
+          <option value="false">Inactive</option>
+        </select>
+        {hasActiveFilters ? (
+          <Button variant="ghost" onClick={clearFilters}>
+            <X size={14} strokeWidth={1.75} aria-hidden="true" />
+            Clear
+          </Button>
+        ) : null}
+      </div>
+
       {users.status === 'loading' ? (
         <LoadingState label="Loading users…" />
       ) : users.status === 'error' ? (
         <ErrorState error={users.error} onRetry={users.refetch} />
-      ) : users.data.length === 0 ? (
-        <EmptyState icon={Users} title="No users yet" description="Create the first user for this Office." />
+      ) : users.data.results.length === 0 ? (
+        hasActiveFilters ? (
+          <EmptyState icon={Search} title="No matching users" description="Try a different search term or clear the filters." />
+        ) : (
+          <EmptyState icon={Users} title="No users yet" description="Create the first user for this Office." />
+        )
       ) : (
-        <div className="wa-settings-table-wrap">
-          <table className="wa-settings-table">
-            <thead>
-              <tr>
-                <th>Username</th>
-                <th>Name</th>
-                <th>Role</th>
-                <th>Office</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.data.map((user) => {
-                const isSelf = user.id === me.id;
-                const canEdit = !isSelf || me.is_superuser;
-                return (
-                  <tr key={user.id}>
-                    <td>{user.username}</td>
-                    <td>{[user.first_name, user.last_name].filter(Boolean).join(' ') || '—'}</td>
-                    <td>{user.is_superuser ? 'Superadmin' : (user.role?.name ?? '—')}</td>
-                    <td>{user.office?.name ?? '—'}</td>
-                    <td>
-                      <Badge tone={user.is_active ? 'success' : 'neutral'}>{user.is_active ? 'Active' : 'Inactive'}</Badge>
-                    </td>
-                    <td>
-                      {user.is_superuser ? null : (
-                        <Button variant="ghost" onClick={() => setModalUser(user)} disabled={!canEdit}>
-                          Edit
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <div className="wa-settings-table-wrap">
+            <table className="wa-settings-table wa-settings-table--responsive">
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Name</th>
+                  <th>Role</th>
+                  <th>Office</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.data.results.map((user) => {
+                  const isSelf = user.id === me.id;
+                  const canEdit = !isSelf || me.is_superuser;
+                  return (
+                    <tr key={user.id}>
+                      <td data-label="Username">{user.username}</td>
+                      <td data-label="Name">{[user.first_name, user.last_name].filter(Boolean).join(' ') || '—'}</td>
+                      <td data-label="Role">{user.is_superuser ? 'Superadmin' : (user.role?.name ?? '—')}</td>
+                      <td data-label="Office">{user.office?.name ?? '—'}</td>
+                      <td data-label="Status">
+                        <Badge tone={user.is_active ? 'success' : 'neutral'}>{user.is_active ? 'Active' : 'Inactive'}</Badge>
+                      </td>
+                      <td data-label="">
+                        {user.is_superuser ? null : (
+                          <Button variant="ghost" onClick={() => setModalUser(user)} disabled={!canEdit}>
+                            Edit
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <Pagination
+            page={page}
+            hasPrevious={page > 1}
+            hasNext={users.data.next !== null}
+            onPrevious={() => setPage((p) => Math.max(1, p - 1))}
+            onNext={() => setPage((p) => p + 1)}
+            totalCount={users.data.count}
+            pageSize={DJANGO_PAGE_SIZE}
+          />
+        </>
       )}
 
       <UserFormModal

@@ -68,6 +68,21 @@ class BotConfig(TimeStampedModel):
     # sensible label rather than an empty button.
     list_footer_text = models.TextField(blank=True, default='')
     list_button_text = models.CharField(max_length=32, blank=True, default='Pilih')
+    # Human-like reply delay — discussed requirement: a bot reply must not
+    # feel instant. `0` (default) preserves the original behavior exactly
+    # (immediate send, no typing indicator at all — see
+    # `apps.chats.conversation_engine._send`/`_send_list`'s own comments).
+    # A positive value makes the engine call WAHA's `startTyping` first,
+    # wait this many seconds (via a scheduled Celery task, never a
+    # blocking `time.sleep` — `apps.chats.tasks`'s own module docstring),
+    # then `stopTyping` before actually sending. Superadmin/Global-Admin
+    # (GLOBAL scope) or an Office Admin (their own Office's scope) sets
+    # this from Settings > Bot Configuration > Config, same access rule
+    # as every other `BotConfig` field (`apps.bot.views._may_access`) —
+    # deliberately not locked to GLOBAL-only like `list_footer_text`/
+    # `list_button_text` above, since reply pacing is a natural
+    # per-Office tuning knob, not shared list-message "chrome".
+    reply_delay_seconds = models.PositiveIntegerField(default=0)
 
     def __str__(self):
         return f'BotConfig({self.office or "GLOBAL"})'

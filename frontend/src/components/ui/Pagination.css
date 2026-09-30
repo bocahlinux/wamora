@@ -1,0 +1,36 @@
+.wa-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-default);
+}
+
+.wa-pagination__summary {
+  font-size: var(--font-size-body-small);
+  color: var(--text-muted);
+}
+
+.wa-pagination__controls {
+  display: flex;
+  gap: var(--space-2);
+}
+
+@media (max-width: 640px) {
+  .wa-pagination {
+    justify-content: center;
+    text-align: center;
+  }
+
+  .wa-pagination__controls {
+    width: 100%;
+  }
+
+  .wa-pagination__controls .wa-button {
+    flex: 1;
+    justify-content: center;
+  }
+}

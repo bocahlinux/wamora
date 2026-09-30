@@ -207,6 +207,15 @@ class PendingChatsViewTests(APITestCase):
         chat = Chat.objects.create(
             session=self.session, provider_chat_id=provider_chat_id, office=office, last_message_at=timezone.now(),
         )
+        # A real WAITING_OPERATOR chat only ever reaches that state after
+        # the citizen sent a real inbound message (that's the only way
+        # into this state machine) — `chats_visible_to`'s inbound-message
+        # requirement (Blast Inbox-visibility fix) needs this fixture to
+        # reflect that, or every "own office" assertion below would break.
+        Message.objects.create(
+            session=self.session, chat=chat, provider_message_id=f'{provider_chat_id}-seed',
+            direction=Message.DIRECTION_INBOUND, timestamp=timezone.now(),
+        )
         ConversationSession.objects.create(chat=chat, state=ConversationSession.STATE_WAITING_OPERATOR)
         return chat
 

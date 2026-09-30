@@ -159,6 +159,41 @@ class BlastCampaignCreateTests(BlastCampaignAPITestCase):
         response = self._create_campaign(creator, session_name='does-not-exist')
         self.assertEqual(response.status_code, 400)
 
+    def test_template_path_mismatched_variables_returns_details_end_to_end(self):
+        # Regression: apps.core.exceptions.api_exception_handler (the
+        # GLOBAL DRF exception handler) only reads `detail.get('detail')`
+        # when normalizing a raised ValidationError — for this
+        # serializer's own dict-shaped `{'recipients': ..., 'details':
+        # [...]}`, that silently dropped the whole `details` array and
+        # replaced `message` with `null`. views.py's
+        # `_serializer_error_response` exists specifically so this
+        # endpoint never raises through that path. Verified here at the
+        # real HTTP layer, not just against the serializer directly
+        # (test_serializers.py), since that's the layer the bug actually
+        # lived at.
+        from apps.blast.models import BlastTemplate
+
+        creator = self._user('creator', scopes=['blast'])
+        template = BlastTemplate.objects.create(
+            key='e2e-details-tpl', name='T', content='Yth {{nama_wp}} {{nopol}}', created_by=creator,
+        )
+        response = self.client.post(
+            '/api/blast/campaigns/',
+            {
+                'session': self.session.name, 'office': self.office_a.pk, 'name': 'x', 'template': template.pk,
+                'recipients': [{'destination': '+6280000000001', 'variables': {'nama_wp': 'Anto'}}],
+            },
+            format='json',
+            **self._auth_header(creator),
+        )
+        self.assertEqual(response.status_code, 400)
+        details = response.data['error']['details']
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]['index'], 0)
+        self.assertIsInstance(details[0]['index'], int)
+        self.assertIn('nopol', details[0]['missing'])
+        self.assertFalse(BlastCampaign.objects.filter(name='x').exists())
+
 
 class BlastCampaignReadAccessTests(BlastCampaignAPITestCase):
     def test_blast_scoped_user_can_list(self):

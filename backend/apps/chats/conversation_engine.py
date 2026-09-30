@@ -70,13 +70,32 @@ def _normalize(text: str) -> str:
     return (text or '').strip()
 
 
-def _send(session: WahaSession, chat_provider_id: str, idempotency_key: str, text: str) -> None:
+def _send(session: WahaSession, chat_provider_id: str, idempotency_key: str, text: str, config=None) -> None:
     """Best-effort outbound, same reused Django -> BFF -> WAHA `sendText`
     path as every other bot-adjacent module in this app — never raises, a
     send failure is logged only, and never rolls back or blocks the
-    already-committed inbound message this is a side effect of."""
+    already-committed inbound message this is a side effect of.
+
+    Discussed requirement — human-like reply delay
+    (`BotConfig.reply_delay_seconds`, `config` optional/`None`-safe since
+    a couple of call sites build a payload before their own config lookup,
+    same convention `_list_chrome` already established): a configured
+    delay > 0 hands off to `apps.chats.tasks.send_bot_text_reply_task`
+    (typing indicator + scheduled send, never a blocking sleep here)
+    instead of calling `send_blast_message` inline. `delay_seconds <= 0`
+    (the default) is byte-for-byte the original immediate-send behavior —
+    no typing indicator, no Celery hop."""
     text = (text or '').strip()
     if not text:
+        return
+    delay_seconds = getattr(config, 'reply_delay_seconds', 0) or 0
+    if delay_seconds > 0:
+        # Local import: apps.chats.tasks imports FROM this module
+        # (expire_waiting_operator_session) at module load time — a
+        # top-level import here would be circular.
+        from apps.chats.tasks import send_bot_text_reply_task
+
+        send_bot_text_reply_task.delay(session.name, chat_provider_id, idempotency_key, text, delay_seconds)
         return
     try:
         send_blast_message(session.name, chat_provider_id, text, idempotency_key)
@@ -84,7 +103,7 @@ def _send(session: WahaSession, chat_provider_id: str, idempotency_key: str, tex
         logger.warning('conversation-engine send failed for %s/%s: %s', session.name, chat_provider_id, exc)
 
 
-def _send_list(waha_session: WahaSession, chat_provider_id: str, idempotency_key: str, list_payload: dict, fallback_text: str) -> None:
+def _send_list(waha_session: WahaSession, chat_provider_id: str, idempotency_key: str, list_payload: dict, fallback_text: str, config=None) -> None:
     """Best-effort outbound via WAHA's interactive `sendList` operation
     (Discussed requirement — Conversation/Bot Engine list menus). Unlike
     `_send` (which simply logs and gives up on failure — acceptable for
@@ -92,7 +111,20 @@ def _send_list(waha_session: WahaSession, chat_provider_id: str, idempotency_key
     a citizen stuck with no way to continue, so this falls back to a
     plain-text `_send` of `fallback_text` (the original numbered-text
     rendering) whenever the list itself fails to dispatch
-    (`BffDispatchError`) or WAHA reports anything other than `"sent"`."""
+    (`BffDispatchError`) or WAHA reports anything other than `"sent"`.
+
+    Same human-like reply-delay hand-off as `_send` above (to
+    `apps.chats.tasks.send_bot_list_reply_task`, which re-implements this
+    same sendList-fails-so-fall-back-to-text behavior for the delayed
+    path, since it runs in a separate task)."""
+    delay_seconds = getattr(config, 'reply_delay_seconds', 0) or 0
+    if delay_seconds > 0:
+        from apps.chats.tasks import send_bot_list_reply_task
+
+        send_bot_list_reply_task.delay(
+            waha_session.name, chat_provider_id, idempotency_key, list_payload, fallback_text, delay_seconds,
+        )
+        return
     try:
         result = send_list_message(waha_session.name, chat_provider_id, list_payload, idempotency_key)
     except BffDispatchError as exc:
@@ -134,7 +166,7 @@ def _send_menu(waha_session: WahaSession, chat_provider_id: str, idempotency_key
     items = list(menu.items.filter(enabled=True).order_by('order', 'id'))
     fallback_text = '\n\n'.join(part for part in [prefix_text, _render_menu_text(menu)] if part)
     if not (1 <= len(items) <= _MAX_LIST_ROWS):
-        _send(waha_session, chat_provider_id, idempotency_key, fallback_text)
+        _send(waha_session, chat_provider_id, idempotency_key, fallback_text, config=config)
         return
     footer, button = _list_chrome(config)
     description = '\n\n'.join(part for part in [prefix_text, menu.intro_text.strip()] if part) or menu.name
@@ -148,7 +180,7 @@ def _send_menu(waha_session: WahaSession, chat_provider_id: str, idempotency_key
             'rows': [{'title': item.label, 'rowId': item.trigger_value, 'description': None} for item in items],
         }],
     }
-    _send_list(waha_session, chat_provider_id, idempotency_key, list_payload, fallback_text)
+    _send_list(waha_session, chat_provider_id, idempotency_key, list_payload, fallback_text, config=config)
 
 
 def _office_selector_rows(offices, page: int) -> list:
@@ -189,7 +221,7 @@ def _send_office_selector(waha_session: WahaSession, chat: Chat, idempotency_key
         'button': button,
         'sections': [{'title': 'Samsat', 'rows': _office_selector_rows(offices, page)}],
     }
-    _send_list(waha_session, chat.provider_chat_id, idempotency_key, list_payload, fallback_text)
+    _send_list(waha_session, chat.provider_chat_id, idempotency_key, list_payload, fallback_text, config=config)
 
 
 def _effective_config(office):
@@ -324,7 +356,7 @@ def _handle_office_selector_reply(waha_session: WahaSession, message, chat: Chat
     offices = list(available_operator_chat_offices())
 
     if not offices:
-        _send(waha_session, chat.provider_chat_id, idempotency_key, NO_OFFICE_AVAILABLE_TEXT)
+        _send(waha_session, chat.provider_chat_id, idempotency_key, NO_OFFICE_AVAILABLE_TEXT, config=config)
         return
 
     list_reply_id = message.list_reply_id
@@ -374,7 +406,7 @@ def _handle_office_selector_reply(waha_session: WahaSession, message, chat: Chat
             # (INVALID_SELECTION_TEXT) — a reply outside the shown range is
             # exactly as invalid as one that no longer resolves to a real,
             # available Office.
-            _send(waha_session, chat.provider_chat_id, idempotency_key, INVALID_SELECTION_TEXT)
+            _send(waha_session, chat.provider_chat_id, idempotency_key, INVALID_SELECTION_TEXT, config=config)
             return
         selected_office = offices[position - 1]
 
@@ -387,7 +419,7 @@ def _handle_office_selector_reply(waha_session: WahaSession, message, chat: Chat
     # docstring).
     selected_chat, error = select_office_for_chat(waha_session, chat.provider_chat_id, selected_office.pk)
     if error is not None:
-        _send(waha_session, chat.provider_chat_id, idempotency_key, INVALID_SELECTION_TEXT)
+        _send(waha_session, chat.provider_chat_id, idempotency_key, INVALID_SELECTION_TEXT, config=config)
         return
 
     # Office selection is recorded on ConversationSession.office (approved
@@ -407,6 +439,7 @@ def _handle_office_selector_reply(waha_session: WahaSession, message, chat: Chat
     _send(
         waha_session, chat.provider_chat_id, idempotency_key,
         OFFICE_SELECTED_TEXT_TEMPLATE.format(office_name=selected_chat.office.name),
+        config=config,
     )
 
 
@@ -428,11 +461,11 @@ def _handle_menu_item(waha_session: WahaSession, message, chat: Chat, session: C
         return
 
     if item.action_type == BotMenuItem.ACTION_SEND_TEXT:
-        _send(waha_session, chat.provider_chat_id, idempotency_key, item.text)
+        _send(waha_session, chat.provider_chat_id, idempotency_key, item.text, config=config)
         _complete_session(session, config)
         _send(
             waha_session, chat.provider_chat_id, _idempotency_key(message, f'item-{item.pk}-completed'),
-            config.session_completed_message if config else '',
+            config.session_completed_message if config else '', config=config,
         )
         return
 
@@ -440,7 +473,7 @@ def _handle_menu_item(waha_session: WahaSession, message, chat: Chat, session: C
         _complete_session(session, config)
         _send(
             waha_session, chat.provider_chat_id, idempotency_key,
-            config.session_completed_message if config else '',
+            config.session_completed_message if config else '', config=config,
         )
         return
 
@@ -453,7 +486,7 @@ def _handle_menu_item(waha_session: WahaSession, message, chat: Chat, session: C
         # WAITING_OPERATOR sessions.
         session.state = ConversationSession.STATE_WAITING_OPERATOR
         session.save(update_fields=['state', 'updated_at'])
-        _send(waha_session, chat.provider_chat_id, idempotency_key, HANDOFF_ACK_TEXT)
+        _send(waha_session, chat.provider_chat_id, idempotency_key, HANDOFF_ACK_TEXT, config=config)
         return
 
     logger.warning('BotMenuItem %s has an unrecognized action_type %r', item.pk, item.action_type)
@@ -477,7 +510,7 @@ def close_waiting_session(chat: Chat) -> ConversationSession | None:
     _complete_session(session, config)
     _send(
         chat.session, chat.provider_chat_id, _idempotency_key_for_session(session, 'close'),
-        config.session_completed_message if config else '',
+        config.session_completed_message if config else '', config=config,
     )
     return session
 
@@ -494,7 +527,7 @@ def expire_waiting_operator_session(session: ConversationSession) -> None:
     _complete_session(session, config)
     _send(
         chat.session, chat.provider_chat_id, _idempotency_key_for_session(session, 'expire'),
-        config.session_completed_message if config else '',
+        config.session_completed_message if config else '', config=config,
     )
 
 

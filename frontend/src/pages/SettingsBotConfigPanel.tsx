@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Bot } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Bot, Search, X } from 'lucide-react';
 
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -162,6 +162,7 @@ function BotConfigForm({
   const [rootMenu, setRootMenu] = useState<number | ''>(config.root_menu ?? '');
   const [listFooterText, setListFooterText] = useState(config.list_footer_text);
   const [listButtonText, setListButtonText] = useState(config.list_button_text);
+  const [replyDelaySeconds, setReplyDelaySeconds] = useState(config.reply_delay_seconds);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [saved, setSaved] = useState(false);
@@ -178,6 +179,7 @@ function BotConfigForm({
       root_menu: rootMenu === '' ? null : rootMenu,
       list_footer_text: listFooterText,
       list_button_text: listButtonText,
+      reply_delay_seconds: replyDelaySeconds,
     });
     setBusy(false);
     if (!result.ok) {
@@ -249,6 +251,21 @@ function BotConfigForm({
 
       <div className="wa-settings-form__field">
         <Input
+          label="Reply delay (seconds)"
+          type="number"
+          min={0}
+          value={String(replyDelaySeconds)}
+          onChange={(e) => setReplyDelaySeconds(Math.max(0, Number(e.target.value) || 0))}
+          disabled={busy}
+        />
+        <p className="wa-settings-form__hint">
+          Waits this many seconds before each automated reply, showing WhatsApp's "typing…" indicator the whole
+          time — 0 sends immediately with no typing indicator, same as before this setting existed.
+        </p>
+      </div>
+
+      <div className="wa-settings-form__field">
+        <Input
           label="List footer text"
           value={listFooterText}
           onChange={(e) => setListFooterText(e.target.value)}
@@ -298,6 +315,13 @@ function BotMenusSection({
   const [deleteTarget, setDeleteTarget] = useState<BotMenu | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<ApiError | null>(null);
+  const [search, setSearch] = useState('');
+
+  const filteredMenus = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return menus;
+    return menus.filter((menu) => menu.name.toLowerCase().includes(term));
+  }, [menus, search]);
 
   async function handleDeleteConfirmed() {
     if (!deleteTarget || deleteBusy) return;
@@ -325,8 +349,30 @@ function BotMenusSection({
       {menus.length === 0 ? (
         <EmptyState icon={Bot} title="No menus yet" description="Create at least one menu, then set it as the Config tab's root menu." />
       ) : (
+        <>
+          <div className="wa-settings-toolbar">
+            <label className="wa-settings-search">
+              <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+              <input
+                type="text"
+                placeholder="Search menus…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search menus"
+              />
+            </label>
+            {search ? (
+              <Button variant="ghost" onClick={() => setSearch('')}>
+                <X size={14} strokeWidth={1.75} aria-hidden="true" />
+                Clear
+              </Button>
+            ) : null}
+          </div>
+          {filteredMenus.length === 0 ? (
+            <EmptyState icon={Search} title="No matching menus" description="Try a different search term." />
+          ) : (
         <div className="wa-settings-table-wrap">
-          <table className="wa-settings-table">
+          <table className="wa-settings-table wa-settings-table--responsive">
             <thead>
               <tr>
                 <th>Name</th>
@@ -337,13 +383,13 @@ function BotMenusSection({
               </tr>
             </thead>
             <tbody>
-              {menus.map((menu) => (
+              {filteredMenus.map((menu) => (
                 <tr key={menu.id}>
-                  <td>{menu.name}</td>
-                  <td>{menu.is_office_selector ? 'Office selector (dynamic)' : 'Ordinary'}</td>
-                  <td>{menu.enabled ? 'Yes' : 'No'}</td>
-                  <td>{menu.is_office_selector ? '—' : menu.items.length}</td>
-                  <td>
+                  <td data-label="Name">{menu.name}</td>
+                  <td data-label="Type">{menu.is_office_selector ? 'Office selector (dynamic)' : 'Ordinary'}</td>
+                  <td data-label="Enabled">{menu.enabled ? 'Yes' : 'No'}</td>
+                  <td data-label="Items">{menu.is_office_selector ? '—' : menu.items.length}</td>
+                  <td data-label="">
                     <Button variant="ghost" onClick={() => setModalMenu(menu)}>
                       Edit
                     </Button>
@@ -361,6 +407,8 @@ function BotMenusSection({
             </tbody>
           </table>
         </div>
+          )}
+        </>
       )}
 
       <BotMenuFormModal
@@ -595,7 +643,7 @@ function BotMenuItemsModal({
         <EmptyState icon={Bot} title="No items yet" description="Add at least one item so this menu has a reply users can select." />
       ) : (
         <div className="wa-settings-table-wrap">
-          <table className="wa-settings-table">
+          <table className="wa-settings-table wa-settings-table--responsive">
             <thead>
               <tr>
                 <th>Order</th>
@@ -611,12 +659,12 @@ function BotMenuItemsModal({
                 .sort((a, b) => a.order - b.order || a.id - b.id)
                 .map((item) => (
                   <tr key={item.id}>
-                    <td>{item.order}</td>
-                    <td>{item.trigger_value}</td>
-                    <td>{item.label}</td>
-                    <td>{ACTION_LABEL[item.action_type]}</td>
-                    <td>{item.enabled ? 'Yes' : 'No'}</td>
-                    <td>
+                    <td data-label="Order">{item.order}</td>
+                    <td data-label="Trigger">{item.trigger_value}</td>
+                    <td data-label="Label">{item.label}</td>
+                    <td data-label="Action">{ACTION_LABEL[item.action_type]}</td>
+                    <td data-label="Enabled">{item.enabled ? 'Yes' : 'No'}</td>
+                    <td data-label="">
                       <Button variant="ghost" onClick={() => setModalItem(item)}>
                         Edit
                       </Button>
@@ -853,6 +901,13 @@ function BotTriggersSection({
   const [deleteTarget, setDeleteTarget] = useState<BotTrigger | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<ApiError | null>(null);
+  const [search, setSearch] = useState('');
+
+  const filteredTriggers = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return triggers;
+    return triggers.filter((trigger) => trigger.keyword.toLowerCase().includes(term));
+  }, [triggers, search]);
 
   async function handleDeleteConfirmed() {
     if (!deleteTarget || deleteBusy) return;
@@ -883,8 +938,30 @@ function BotTriggersSection({
       {triggers.length === 0 ? (
         <EmptyState icon={Bot} title="No triggers yet" description='Add keywords like "Halo" or "Menu" that always restart the flow.' />
       ) : (
+        <>
+          <div className="wa-settings-toolbar">
+            <label className="wa-settings-search">
+              <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+              <input
+                type="text"
+                placeholder="Search triggers…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search triggers"
+              />
+            </label>
+            {search ? (
+              <Button variant="ghost" onClick={() => setSearch('')}>
+                <X size={14} strokeWidth={1.75} aria-hidden="true" />
+                Clear
+              </Button>
+            ) : null}
+          </div>
+          {filteredTriggers.length === 0 ? (
+            <EmptyState icon={Search} title="No matching triggers" description="Try a different search term." />
+          ) : (
         <div className="wa-settings-table-wrap">
-          <table className="wa-settings-table">
+          <table className="wa-settings-table wa-settings-table--responsive">
             <thead>
               <tr>
                 <th>Keyword</th>
@@ -894,12 +971,12 @@ function BotTriggersSection({
               </tr>
             </thead>
             <tbody>
-              {triggers.map((trigger) => (
+              {filteredTriggers.map((trigger) => (
                 <tr key={trigger.id}>
-                  <td>{trigger.keyword}</td>
-                  <td>{menus.find((m) => m.id === trigger.target_menu)?.name ?? '—'}</td>
-                  <td>{trigger.enabled ? 'Yes' : 'No'}</td>
-                  <td>
+                  <td data-label="Keyword">{trigger.keyword}</td>
+                  <td data-label="Target menu">{menus.find((m) => m.id === trigger.target_menu)?.name ?? '—'}</td>
+                  <td data-label="Enabled">{trigger.enabled ? 'Yes' : 'No'}</td>
+                  <td data-label="">
                     <Button variant="ghost" onClick={() => setModalTrigger(trigger)}>
                       Edit
                     </Button>
@@ -912,6 +989,8 @@ function BotTriggersSection({
             </tbody>
           </table>
         </div>
+          )}
+        </>
       )}
 
       <BotTriggerFormModal

@@ -6,6 +6,7 @@ import { buildCorsOptions } from './corsOptions';
 import { createApiRateLimiter } from './middleware/rateLimit';
 import healthRouter from './routes/health';
 import internalBlastRouter from './routes/internalBlast';
+import internalTypingRouter from './routes/internalTyping';
 import messagesRouter from './routes/messages';
 import sessionRouter from './routes/session';
 
@@ -38,6 +39,10 @@ export function createApp() {
   // gated by requireOfficeDispatchKey only, never requireAuth/requireScope
   // — see routes/internalBlast.ts's own docstring.
   app.use('/internal', internalBlastRouter);
+  // Discussed requirement — human-like bot reply delay + Inbox composer
+  // typing indicator (Office/Celery -> BFF half; see routes/internalTyping.ts's
+  // own docstring). Same mount pattern/auth boundary as internalBlastRouter.
+  app.use('/internal', internalTypingRouter);
 
   return app;
 }

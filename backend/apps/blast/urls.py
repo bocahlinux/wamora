@@ -1,13 +1,19 @@
 from django.urls import path
 
 from .views import (
+    BlastApiKeyListCreateView,
+    BlastApiKeyRevokeView,
     BlastCampaignApproveView,
     BlastCampaignDetailView,
     BlastCampaignListCreateView,
     BlastCampaignRejectView,
     BlastCampaignSubmitView,
+    BlastHistoryView,
     BlastOfficeChoicesView,
     BlastRecipientResolveView,
+    BlastSettingsView,
+    BlastTemplateDetailView,
+    BlastTemplateListCreateView,
 )
 
 urlpatterns = [
@@ -22,4 +28,10 @@ urlpatterns = [
         BlastRecipientResolveView.as_view(),
         name='blast-recipient-resolve',
     ),
+    path('templates/', BlastTemplateListCreateView.as_view(), name='blast-template-list-create'),
+    path('templates/<int:pk>/', BlastTemplateDetailView.as_view(), name='blast-template-detail'),
+    path('api-keys/', BlastApiKeyListCreateView.as_view(), name='blast-api-key-list-create'),
+    path('api-keys/<int:pk>/revoke/', BlastApiKeyRevokeView.as_view(), name='blast-api-key-revoke'),
+    path('settings/', BlastSettingsView.as_view(), name='blast-settings'),
+    path('history/', BlastHistoryView.as_view(), name='blast-history'),
 ]

@@ -19,6 +19,16 @@ const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:
 // third-party modal library was added — this is the smallest primitive
 // that satisfies spec Section 16's accessibility requirements (keyboard
 // navigable, visible focus, dialogs trap focus correctly).
+//
+// Discussed requirement — every CRUD modal in the app must NOT close on
+// an outside/backdrop click, and NOT on Escape either: closing is only
+// ever the explicit "Cancel" button (each form's own) or this header's
+// "X". This is a single shared component, so the rule applies everywhere
+// a modal is used for CRUD without needing to touch each call site —
+// deliberately a stricter contract than a typical dialog (which usually
+// treats "click outside"/Escape as an implicit cancel) because an
+// operator mid-way through a form (Office/User/Role/Bot menu, etc.) must
+// never lose unsaved input to a stray click or key press.
 export function Modal({ open, onClose, title, children }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -28,10 +38,6 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
     dialog?.focus();
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        onClose();
-        return;
-      }
       if (event.key !== 'Tab' || !dialog) return;
       const focusables = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
       if (focusables.length === 0) return;
@@ -48,12 +54,12 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
   return (
-    <div className="wa-modal-backdrop" onClick={onClose}>
+    <div className="wa-modal-backdrop">
       <div
         className="wa-modal"
         role="dialog"
@@ -61,7 +67,6 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
         aria-label={title}
         ref={dialogRef}
         tabIndex={-1}
-        onClick={(event) => event.stopPropagation()}
       >
         <div className="wa-modal__header">
           <h2 className="wa-modal__title">{title}</h2>

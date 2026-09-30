@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { WAHA_ALLOWED_ENDPOINTS } from '../src/wahaAllowlist';
 
 describe('WAHA_ALLOWED_ENDPOINTS', () => {
-  it('contains exactly the Phase 6 contract\'s eight endpoints plus sendList (Conversation/Bot Engine list menus), nothing else', () => {
+  it('contains exactly the Phase 6 contract\'s eight endpoints plus sendList (Conversation/Bot Engine list menus) and startTyping/stopTyping (human-like reply delay + Inbox composer typing indicator), nothing else', () => {
     expect(Object.keys(WAHA_ALLOWED_ENDPOINTS).sort()).toEqual(
       [
         'getSessionStatus',
@@ -15,6 +15,8 @@ describe('WAHA_ALLOWED_ENDPOINTS', () => {
         'requestPairingCode',
         'sendText',
         'sendList',
+        'startTyping',
+        'stopTyping',
       ].sort(),
     );
   });
@@ -38,6 +40,8 @@ describe('WAHA_ALLOWED_ENDPOINTS', () => {
     );
     expect(WAHA_ALLOWED_ENDPOINTS.sendText.path('test_session')).toBe('/api/sendText');
     expect(WAHA_ALLOWED_ENDPOINTS.sendList.path('test_session')).toBe('/api/sendList');
+    expect(WAHA_ALLOWED_ENDPOINTS.startTyping.path('test_session')).toBe('/api/startTyping');
+    expect(WAHA_ALLOWED_ENDPOINTS.stopTyping.path('test_session')).toBe('/api/stopTyping');
   });
 
   it('URL-encodes the session name to prevent path injection', () => {

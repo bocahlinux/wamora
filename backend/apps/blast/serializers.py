@@ -5,25 +5,48 @@ from apps.offices.authorization import get_user_office, has_global_access
 from apps.offices.models import Office
 from apps.waha_sessions.models import WahaSession
 
-from .models import BlastCampaign, BlastRecipient
+from .models import BlastCampaign, BlastRecipient, BlastTemplate
+from .templating import extract_variable_names
 
 
 class BlastRecipientSerializer(serializers.ModelSerializer):
     class Meta:
         model = BlastRecipient
-        fields = ['id', 'destination', 'status', 'scheduled_for', 'sent_at', 'failure_reason']
+        fields = ['id', 'destination', 'status', 'scheduled_for', 'sent_at', 'failure_reason', 'variables']
         read_only_fields = fields
 
 
 class BlastCampaignCreateSerializer(serializers.ModelSerializer):
     """POST /api/blast/campaigns/ — creates a `draft` campaign with its
-    recipient list. `recipients` is a flat list of destination strings
-    (v1 — no CSV import tooling, per the design audit Section 10's
-    "optional, first slice can defer")."""
+    recipient list.
+
+    `recipients` accepts a MIXED shape, item by item:
+    - a bare string (the original, freeform path — unchanged, additive):
+      just a destination, no per-recipient variables.
+    - an object `{"destination": str, "variables": {...}}` (the template
+      path, used when `template` is given): `variables` must carry
+      exactly the set of `{{...}}` names `template.content` declares (via
+      `extract_variable_names`) — checked in `validate()` below, where
+      ANY single row failing rejects the WHOLE request (400), never a
+      partial create.
+
+    `template` is optional; when given, `content` is snapshotted into
+    `message_template` server-side — any client-supplied
+    `message_template` is ignored in that case (the DB column always
+    keeps the literal template text, `{{...}}` placeholders and all, per
+    `apps.blast.templating`'s own module docstring)."""
 
     session = serializers.SlugRelatedField(slug_field='name', queryset=WahaSession.objects.all())
+    template = serializers.PrimaryKeyRelatedField(
+        queryset=BlastTemplate.objects.filter(is_active=True), required=False, allow_null=True
+    )
+    # message_template is required only when no template is given — that
+    # conditional requirement can't be expressed by the model's own
+    # TextField(blank=False), so it's overridden here and enforced in
+    # validate() instead of a per-field validate_message_template.
+    message_template = serializers.CharField(required=False, allow_blank=True)
     recipients = serializers.ListField(
-        child=serializers.CharField(max_length=128, allow_blank=False),
+        child=serializers.JSONField(),
         write_only=True,
         allow_empty=False,
     )
@@ -46,7 +69,9 @@ class BlastCampaignCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = BlastCampaign
-        fields = ['id', 'session', 'office', 'name', 'message_template', 'recipients', 'status', 'created_at']
+        fields = [
+            'id', 'session', 'office', 'name', 'template', 'message_template', 'recipients', 'status', 'created_at',
+        ]
         read_only_fields = ['id', 'status', 'created_at']
 
     def validate_name(self, value):
@@ -55,10 +80,39 @@ class BlastCampaignCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('name must not be blank.')
         return value
 
-    def validate_message_template(self, value):
-        if not value.strip():
-            raise serializers.ValidationError('message_template must not be blank.')
-        return value
+    def validate_recipients(self, value):
+        # Normalizes both accepted shapes (bare string, or
+        # {"destination", "variables"}) into one internal shape so every
+        # downstream step (dedup, the template-variables check in
+        # validate(), create()) has exactly one thing to deal with.
+        normalized = []
+        for item in value:
+            if isinstance(item, str):
+                destination = item.strip()
+                variables = {}
+            elif isinstance(item, dict):
+                destination = str(item.get('destination', '')).strip()
+                variables = item.get('variables') or {}
+                if not isinstance(variables, dict):
+                    raise serializers.ValidationError('Each recipient\'s variables must be an object.')
+            else:
+                raise serializers.ValidationError('Each recipient must be a string or an object.')
+            if not destination:
+                continue
+            normalized.append({'destination': destination, 'variables': variables})
+        # Order-preserving de-duplication by destination — the DB-level
+        # UniqueConstraint (models.py) is the real enforcement boundary;
+        # this just avoids a noisy IntegrityError for the common "pasted
+        # list has an accidental repeat" case.
+        deduped = list({r['destination']: r for r in normalized}.values())
+        if not deduped:
+            raise serializers.ValidationError('At least one recipient is required.')
+        # Finalized decision 3: max 100 recipients/campaign, enforced at
+        # creation.
+        max_recipients = settings.BLAST_MAX_RECIPIENTS_PER_CAMPAIGN
+        if len(deduped) > max_recipients:
+            raise serializers.ValidationError(f'A campaign may have at most {max_recipients} recipients.')
+        return deduped
 
     def validate(self, attrs):
         # Step 4 (Office integration). Runs after every per-field
@@ -84,30 +138,51 @@ class BlastCampaignCreateSerializer(serializers.ModelSerializer):
         # Office branch, which bypasses that field's queryset filter).
         if not attrs['office'].is_active:
             raise serializers.ValidationError({'office': 'This Office is not active.'})
-        return attrs
 
-    def validate_recipients(self, value):
-        # Order-preserving de-duplication of exact-string repeats — the
-        # DB-level UniqueConstraint (models.py) is the real enforcement
-        # boundary; this just avoids a noisy IntegrityError for the
-        # common "pasted list has an accidental repeat" case.
-        deduped = list(dict.fromkeys(d.strip() for d in value if d.strip()))
-        if not deduped:
-            raise serializers.ValidationError('At least one recipient is required.')
-        # Finalized decision 3: max 100 recipients/campaign, enforced at
-        # creation.
-        max_recipients = settings.BLAST_MAX_RECIPIENTS_PER_CAMPAIGN
-        if len(deduped) > max_recipients:
-            raise serializers.ValidationError(f'A campaign may have at most {max_recipients} recipients.')
-        return deduped
+        template = attrs.get('template')
+        recipients = attrs.get('recipients') or []
+        if template is not None:
+            # Template path — content is ALWAYS the server-side snapshot,
+            # any client-supplied message_template is ignored outright.
+            attrs['message_template'] = template.content
+            required_vars = extract_variable_names(template.content)
+            details = []
+            for index, recipient in enumerate(recipients):
+                row_vars = recipient['variables']
+                row_keys = {key for key, val in row_vars.items() if str(val).strip() != ''}
+                missing = required_vars - row_keys
+                extra = row_keys - required_vars
+                if missing or extra:
+                    details.append({
+                        'index': index,
+                        'destination': recipient['destination'],
+                        'missing': sorted(missing),
+                        'extra': sorted(extra),
+                    })
+            if details:
+                raise serializers.ValidationError({
+                    'recipients': 'One or more recipients have missing or unexpected variables.',
+                    'details': details,
+                })
+        else:
+            # Freeform path — message_template is required exactly as
+            # before, now enforced here rather than a per-field validator
+            # (that field is conditionally required depending on
+            # `template`, which a field-level validator can't see).
+            message_template = (attrs.get('message_template') or '').strip()
+            if not message_template:
+                raise serializers.ValidationError({'message_template': 'message_template must not be blank.'})
+            attrs['message_template'] = message_template
+        return attrs
 
     def create(self, validated_data):
         recipients = validated_data.pop('recipients')
         request = self.context['request']
         campaign = BlastCampaign.objects.create(created_by=request.user, **validated_data)
-        BlastRecipient.objects.bulk_create(
-            [BlastRecipient(campaign=campaign, destination=destination) for destination in recipients]
-        )
+        BlastRecipient.objects.bulk_create([
+            BlastRecipient(campaign=campaign, destination=r['destination'], variables=r['variables'])
+            for r in recipients
+        ])
         return campaign
 
 
@@ -119,13 +194,23 @@ class BlastCampaignListSerializer(serializers.ModelSerializer):
     created_by = serializers.CharField(source='created_by.username', read_only=True)
     approved_by = serializers.CharField(source='approved_by.username', read_only=True, default=None)
     recipient_count = serializers.SerializerMethodField()
+    template = serializers.SerializerMethodField()
+    source = serializers.SerializerMethodField()
 
     class Meta:
         model = BlastCampaign
         fields = [
-            'id', 'session', 'office', 'name', 'status', 'recipient_count',
+            'id', 'session', 'office', 'name', 'status', 'recipient_count', 'template', 'source',
             'created_by', 'approved_by', 'approved_at', 'created_at', 'updated_at',
         ]
+
+    def get_template(self, obj):
+        if obj.template_id is None:
+            return None
+        return {'id': obj.template_id, 'key': obj.template.key, 'name': obj.template.name}
+
+    def get_source(self, obj):
+        return 'api' if obj.triggered_by_api_key_id is not None else 'dashboard'
 
     def get_office(self, obj):
         if obj.office_id is None:
@@ -134,6 +219,32 @@ class BlastCampaignListSerializer(serializers.ModelSerializer):
 
     def get_recipient_count(self, obj):
         return obj.recipients.count()
+
+
+class BlastTemplateSerializer(serializers.ModelSerializer):
+    """CRUD for BlastTemplate — Blast > Templates tab. `variable_names`
+    is derived (never stored) via `extract_variable_names`, so the
+    frontend's "detected variables" preview always matches exactly what
+    server-side campaign/external-API validation will check against."""
+
+    variable_names = serializers.SerializerMethodField()
+    created_by = serializers.CharField(source='created_by.username', read_only=True)
+
+    class Meta:
+        model = BlastTemplate
+        fields = [
+            'id', 'key', 'name', 'content', 'variable_names', 'office', 'is_active', 'created_by',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+    def get_variable_names(self, obj):
+        return sorted(extract_variable_names(obj.content))
+
+    def validate_content(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('content must not be blank.')
+        return value
 
 
 class BlastCampaignDetailSerializer(BlastCampaignListSerializer):

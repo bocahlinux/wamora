@@ -10,18 +10,18 @@ import { Modal } from '../components/ui/Modal';
 import { PageHeader } from '../components/ui/PageHeader';
 import { mapSyncStatus, StatusBadge } from '../components/ui/StatusBadge';
 import type { ApiError, ApiResult } from '../lib/api';
-import { sendMessage } from '../lib/bffApi';
+import { sendMessage, startTyping, stopTyping } from '../lib/bffApi';
 import {
   assignChat,
   claimChat,
   closeChatSession,
+  getAllUsers,
   getChatMessages,
   getChatOperators,
   getChats,
   getMe,
   getOffices,
   getSyncStatus,
-  getUsers,
   markChatRead,
   recoverSyncCheckpoint,
   transferChat,
@@ -358,7 +358,7 @@ export function InboxPage() {
     setTransferOfficeId('');
     setOfficesState({ status: 'loading' });
     setUsersState({ status: 'loading' });
-    const [officesResult, usersResult] = await Promise.all([getOffices(), getUsers()]);
+    const [officesResult, usersResult] = await Promise.all([getOffices(), getAllUsers()]);
     setOfficesState(officesResult.ok ? { status: 'success', data: officesResult.data } : { status: 'error', error: officesResult.error });
     setUsersState(usersResult.ok ? { status: 'success', data: usersResult.data } : { status: 'error', error: usersResult.error });
   }
@@ -514,6 +514,46 @@ export function InboxPage() {
   const [sendBusy, setSendBusy] = useState(false);
   const [sendFeedback, setSendFeedback] = useState<SendFeedback | null>(null);
 
+  // Discussed requirement — Inbox composer typing indicator. Debounced:
+  // `startTyping` fires once when the operator begins typing (not on
+  // every keystroke), `stopTyping` fires after a short pause with no
+  // further input, on an actual send, or when navigating away from this
+  // chat (the effect below) — never left showing "typing…" on a chat the
+  // operator is no longer looking at.
+  const TYPING_STOP_DELAY_MS = 3000;
+  const typingStopTimerRef = useRef<number | null>(null);
+  const isTypingRef = useRef(false);
+
+  const stopTypingIndicator = useCallback(() => {
+    if (typingStopTimerRef.current !== null) {
+      window.clearTimeout(typingStopTimerRef.current);
+      typingStopTimerRef.current = null;
+    }
+    if (isTypingRef.current && sessionName && selectedChat) {
+      isTypingRef.current = false;
+      void stopTyping(sessionName, selectedChat.provider_chat_id);
+    }
+  }, [sessionName, selectedChat]);
+
+  function handleDraftChange(value: string) {
+    setDraftText(value);
+    if (!sessionName || !selectedChat || !canSendMessage) return;
+    if (!isTypingRef.current) {
+      isTypingRef.current = true;
+      void startTyping(sessionName, selectedChat.provider_chat_id);
+    }
+    if (typingStopTimerRef.current !== null) window.clearTimeout(typingStopTimerRef.current);
+    typingStopTimerRef.current = window.setTimeout(stopTypingIndicator, TYPING_STOP_DELAY_MS);
+  }
+
+  // Stop the indicator when navigating away from this chat (or on
+  // unmount) — the cleanup closes over the CHAT being left, not the one
+  // just entered.
+  useEffect(() => {
+    return () => stopTypingIndicator();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChat?.id, sessionName]);
+
   // Discussed requirement — a chat can only be replied to directly
   // while: (1) the citizen is actively waiting for an operator (chose
   // "Chat dengan Operator" and hasn't been closed/expired yet), (2) it's
@@ -540,6 +580,7 @@ export function InboxPage() {
   async function handleSend() {
     const text = draftText.trim();
     if (!text || !selectedChat || !sessionName || sendBusy || !canSendMessage) return;
+    stopTypingIndicator();
     setSendBusy(true);
     setSendFeedback(null);
     // Discussed requirement — every manually-typed reply is signed with
@@ -594,9 +635,28 @@ export function InboxPage() {
         actions={
           <>
             {isOperator ? (
-              <Button variant="secondary" disabled={availabilityBusy} onClick={handleToggleAvailability}>
-                {meQuery.status === 'success' && meQuery.data.is_available ? 'Available' : 'Unavailable'}
-              </Button>
+              <div className="wa-inbox__availability">
+                {/* Status (what IS true right now) is shown separately from
+                    the action (what clicking WILL do) — the single
+                    "Available"/"Unavailable" button previously used its
+                    own current state as its label, which read as ambiguous
+                    (is this what I am, or what I'm about to become?). */}
+                <StatusBadge
+                  status={meQuery.status === 'success' && meQuery.data.is_available ? 'healthy' : 'offline'}
+                  label={meQuery.status === 'success' && meQuery.data.is_available ? 'You are Available' : 'You are Unavailable'}
+                />
+                <Button
+                  variant={meQuery.status === 'success' && meQuery.data.is_available ? 'secondary' : 'primary'}
+                  disabled={availabilityBusy || meQuery.status !== 'success'}
+                  onClick={handleToggleAvailability}
+                >
+                  {availabilityBusy
+                    ? 'Updating…'
+                    : meQuery.status === 'success' && meQuery.data.is_available
+                      ? 'Go Unavailable'
+                      : 'Go Available'}
+                </Button>
+              </div>
             ) : null}
             {syncStatus ? (
               <StatusBadge
@@ -825,7 +885,7 @@ export function InboxPage() {
                     className="wa-inbox__composer-input"
                     placeholder={canSendMessage ? 'Type a message…' : 'Menunggu wajib pajak memilih "Chat dengan Operator"…'}
                     value={draftText}
-                    onChange={(e) => setDraftText(e.target.value)}
+                    onChange={(e) => handleDraftChange(e.target.value)}
                     disabled={sendBusy || !canSendMessage}
                     rows={2}
                   />

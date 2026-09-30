@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Plus, ShieldCheck } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Plus, Search, ShieldCheck, X } from 'lucide-react';
 
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -47,6 +47,16 @@ export function SettingsRolesPanel({ roles }: { roles: ReturnType<typeof useApiQ
   const [deleteTarget, setDeleteTarget] = useState<Role | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<ApiError | null>(null);
+  // Roles is never server-side paginated (small catalog, reused as a
+  // full-list dropdown source elsewhere) — search is plain client-side.
+  const [search, setSearch] = useState('');
+
+  const filtered = useMemo(() => {
+    if (roles.status !== 'success') return [];
+    const term = search.trim().toLowerCase();
+    if (!term) return roles.data;
+    return roles.data.filter((role) => role.name.toLowerCase().includes(term));
+  }, [roles, search]);
 
   async function handleDeleteConfirmed() {
     if (!deleteTarget || deleteBusy) return;
@@ -72,6 +82,27 @@ export function SettingsRolesPanel({ roles }: { roles: ReturnType<typeof useApiQ
         </Button>
       </div>
 
+      {roles.status === 'success' && roles.data.length > 0 ? (
+        <div className="wa-settings-toolbar">
+          <label className="wa-settings-search">
+            <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+            <input
+              type="text"
+              placeholder="Search Roles…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search Roles"
+            />
+          </label>
+          {search ? (
+            <Button variant="ghost" onClick={() => setSearch('')}>
+              <X size={14} strokeWidth={1.75} aria-hidden="true" />
+              Clear
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
       {roles.status === 'loading' ? (
         <LoadingState label="Loading roles…" />
       ) : roles.status === 'error' ? (
@@ -82,9 +113,11 @@ export function SettingsRolesPanel({ roles }: { roles: ReturnType<typeof useApiQ
           title="No Roles yet"
           description="Create a Role to control which menus/features a user's account can use, then assign it to them from Users."
         />
+      ) : filtered.length === 0 ? (
+        <EmptyState icon={Search} title="No matching Roles" description="Try a different search term." />
       ) : (
         <div className="wa-settings-table-wrap">
-          <table className="wa-settings-table">
+          <table className="wa-settings-table wa-settings-table--responsive">
             <thead>
               <tr>
                 <th>Name</th>
@@ -94,10 +127,10 @@ export function SettingsRolesPanel({ roles }: { roles: ReturnType<typeof useApiQ
               </tr>
             </thead>
             <tbody>
-              {roles.data.map((role) => (
+              {filtered.map((role) => (
                 <tr key={role.id}>
-                  <td>{role.name}</td>
-                  <td>
+                  <td data-label="Name">{role.name}</td>
+                  <td data-label="Organizational standing">
                     {[
                       role.grants_global_access ? 'Global access' : null,
                       role.is_office_admin ? 'Office Admin' : null,
@@ -106,12 +139,12 @@ export function SettingsRolesPanel({ roles }: { roles: ReturnType<typeof useApiQ
                       .filter(Boolean)
                       .join(', ') || '—'}
                   </td>
-                  <td>
+                  <td data-label="Grants">
                     {role.scopes.length === 0
                       ? '—'
                       : role.scopes.map((s) => SCOPE_LABEL[s] ?? s).join(', ')}
                   </td>
-                  <td>
+                  <td data-label="">
                     <Button variant="ghost" onClick={() => setModalRole(role)}>
                       Edit
                     </Button>

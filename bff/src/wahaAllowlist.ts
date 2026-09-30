@@ -18,7 +18,10 @@ export type WahaEndpointName =
   | 'getQr'
   | 'requestPairingCode'
   | 'sendText'
-  | 'sendList';
+  | 'sendList'
+  | 'startTyping'
+  | 'stopTyping'
+  | 'checkNumberExists';
 
 interface WahaEndpointDef {
   method: 'GET' | 'POST';
@@ -42,4 +45,17 @@ export const WAHA_ALLOWED_ENDPOINTS: Record<WahaEndpointName, WahaEndpointDef> =
   // to the allowlist — never assumed from WAHA's general documentation
   // alone (this project's standing evidence-based rule).
   sendList: { method: 'POST', path: () => '/api/sendList' },
+  // Discussed requirement — human-like reply delay (bot auto-reply) and
+  // the Inbox composer's own typing indicator. Request shape given
+  // directly by the project operator's own curl examples: POST with
+  // `{chatId, session}`, no session in the path — same "session lives in
+  // the body, not the URL" shape `sendText`/`sendList` already use.
+  startTyping: { method: 'POST', path: () => '/api/startTyping' },
+  stopTyping: { method: 'POST', path: () => '/api/stopTyping' },
+  // Blast number-validity check (Discussed requirement) — live-verified
+  // directly against the real WAHA deployment: `phone`/`session` as query
+  // params, response `{numberExists, chatId, pn}`. Not a documentation
+  // guess (this project's standing evidence-based rule for every WAHA
+  // endpoint added to this allowlist).
+  checkNumberExists: { method: 'GET', path: () => '/api/contacts/check-exists' },
 };

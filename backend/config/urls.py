@@ -26,6 +26,11 @@ urlpatterns = [
     path('api/chats/', include('apps.chats.urls')),
     path('api/sync/', include('apps.sync.api_urls')),
     path('api/blast/', include('apps.blast.urls')),
+    # External Blast-trigger API (apps.blast.external_views) — a clearly
+    # separate namespace from /api/blast/ (JWT-authenticated dashboard)
+    # and /internal/ (BFF/office-dispatch shared-secret traffic); its own
+    # security boundary is the X-Api-Key check, not this path.
+    path('api/external/', include('apps.blast.external_urls')),
     path('api/bot/', include('apps.bot.urls')),
     path('api/', include('apps.offices.urls')),
     path('internal/', include('apps.operations.urls')),

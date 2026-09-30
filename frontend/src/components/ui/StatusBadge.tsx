@@ -144,6 +144,8 @@ export function mapBlastRecipientStatus(raw: string | undefined): StatusKind {
       return 'error';
     case 'skipped':
       return 'offline';
+    case 'invalid_number':
+      return 'error';
     default:
       return 'unknown';
   }

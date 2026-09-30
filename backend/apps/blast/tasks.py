@@ -36,14 +36,14 @@ import logging
 from datetime import timedelta
 
 from celery import shared_task
-from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
 from apps.operations.models import OutboundOperation
 
-from .bff_client import BffDispatchError, send_blast_message
-from .models import OPERATION_TYPE_BLAST_SEND, BlastCampaign, BlastRecipient
+from .bff_client import BffDispatchError, check_number_exists, send_blast_message
+from .models import OPERATION_TYPE_BLAST_SEND, BlastCampaign, BlastRecipient, get_blast_settings
+from .templating import render_template
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,10 @@ def schedule_blast_campaign_task(self, campaign_id):
         logger.info('schedule_blast_campaign_task campaign_id=%s already scheduled/not approved', campaign_id)
         return {'campaign_id': campaign_id, 'skipped': 'not_approved'}
 
-    delay_seconds = settings.BLAST_INTER_MESSAGE_DELAY_SECONDS
+    # Discussed requirement — dynamic, admin-editable delay, applied to
+    # EVERY campaign (dashboard and API-triggered alike), replacing the
+    # static settings.BLAST_INTER_MESSAGE_DELAY_SECONDS env var.
+    delay_seconds = get_blast_settings().inter_message_delay_seconds
     now = timezone.now()
 
     # Same-session throttle across DIFFERENT campaigns (finalized decision
@@ -162,6 +165,25 @@ def dispatch_blast_recipient_task(self, recipient_id):
         logger.info('dispatch_blast_recipient_task recipient_id=%s already claimed', recipient_id)
         return {'recipient_id': recipient_id, 'skipped': 'already_claimed'}
 
+    # Discussed requirement — number-validity check, before spending a
+    # WAHA send attempt on a number confirmed not to have WhatsApp. Only
+    # a DEFINITE `False` short-circuits; `True` or `None` (ambiguous,
+    # e.g. a BFF/WAHA-level failure) falls through to the unchanged send
+    # path below — never silently drop a recipient on ambiguity.
+    try:
+        number_exists = check_number_exists(campaign.session.name, recipient.destination)
+    except BffDispatchError as exc:
+        logger.warning('dispatch_blast_recipient_task recipient_id=%s number-check failed: %s', recipient_id, exc)
+        number_exists = None
+
+    if number_exists is False:
+        BlastRecipient.objects.filter(pk=recipient.pk).update(
+            status=BlastRecipient.STATUS_INVALID_NUMBER,
+            failure_reason='This number does not appear to be registered on WhatsApp.',
+        )
+        _maybe_finalize_campaign(campaign.pk)
+        return {'recipient_id': recipient_id, 'result': 'invalid_number'}
+
     idempotency_key = recipient.idempotency_key
     operation, created = OutboundOperation.objects.get_or_create(
         session=campaign.session,
@@ -184,8 +206,14 @@ def dispatch_blast_recipient_task(self, recipient_id):
         _maybe_finalize_campaign(campaign.pk)
         return {'recipient_id': recipient_id, 'result': 'already_sent'}
 
+    # render_template is a no-op passthrough for a freeform (non-templated)
+    # campaign, whose recipients always have `variables={}` — the literal
+    # `campaign.message_template` (never containing `{{...}}`) comes back
+    # unchanged.
+    rendered_text = render_template(campaign.message_template, recipient.variables)
+
     try:
-        result = send_blast_message(campaign.session.name, recipient.destination, campaign.message_template, idempotency_key)
+        result = send_blast_message(campaign.session.name, recipient.destination, rendered_text, idempotency_key)
     except BffDispatchError as exc:
         logger.warning('dispatch_blast_recipient_task recipient_id=%s BFF dispatch failed: %s', recipient_id, exc)
         result = {'status': 'failed', 'provider_message_id': None}
@@ -197,6 +225,7 @@ def dispatch_blast_recipient_task(self, recipient_id):
         BlastRecipient.objects.filter(pk=recipient.pk).update(
             status=BlastRecipient.STATUS_SENT, sent_at=timezone.now(), outbound_operation=operation, failure_reason='',
         )
+        _trigger_instant_refresh(campaign, recipient.destination)
     else:
         # Both 'failed' (WAHA/BFF cleanly reported failure) and 'unknown'
         # (ambiguous — e.g. a timeout) are recorded as BlastRecipient
@@ -215,6 +244,45 @@ def dispatch_blast_recipient_task(self, recipient_id):
 
     _maybe_finalize_campaign(campaign.pk)
     return {'recipient_id': recipient_id, 'result': result['status']}
+
+
+def _trigger_instant_refresh(campaign, destination: str) -> None:
+    """Discussed requirement — instant refresh for an already-qualifying
+    conversation. Best-effort ONLY: tries the raw destination and the
+    two common WAHA suffix forms, filtered to a Chat that already
+    qualifies for Inbox visibility (has a real inbound message — the
+    exact same rule `apps.chats.authorization.chats_visible_to` applies).
+    If nothing matches, this recipient simply isn't in an existing
+    conversation yet, and per that same visibility rule there is nothing
+    to refresh — silently doing nothing is the correct behavior, not a
+    missed case.
+
+    Calls `apps.sync.tasks.reconcile_chat_task` directly (a Celery task
+    call, in-process) rather than via the BFF's HTTP
+    `/internal/reconciliation/trigger/` endpoint — that endpoint exists
+    only because the BFF is a separate Node process with no Celery
+    access; this code already runs inside Django/Celery.
+
+    Never raises — a failure here must never affect the recipient's
+    already-recorded `sent` status."""
+    from apps.chats.models import Chat, Message
+    from apps.sync.tasks import reconcile_chat_task
+
+    try:
+        candidate_ids = {destination, f'{destination}@c.us', f'{destination}@s.whatsapp.net'}
+        chat = (
+            Chat.objects.filter(
+                session_id=campaign.session_id,
+                provider_chat_id__in=candidate_ids,
+                messages__direction=Message.DIRECTION_INBOUND,
+            )
+            .distinct()
+            .first()
+        )
+        if chat is not None:
+            reconcile_chat_task.delay(campaign.session.name, chat.pk)
+    except Exception:
+        logger.warning('blast instant-refresh lookup failed for destination=%s', destination, exc_info=True)
 
 
 def _maybe_finalize_campaign(campaign_id):

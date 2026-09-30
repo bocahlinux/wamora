@@ -97,13 +97,27 @@ class ChatsApiTestCase(APITestCase):
     def _no_scope_user(self, username='noscope'):
         return User.objects.create_user(username, password='pw')
 
-    def _create_chat(self, **kwargs):
+    def _create_chat(self, with_inbound_message=True, **kwargs):
         """Same session/office defaults as `_reading_user`'s default
         Office, so a chat and its reader are in the same Office unless a
-        test explicitly overrides one of them (Step 5)."""
+        test explicitly overrides one of them (Step 5).
+
+        Inbox-visibility rule (`chats_visible_to`) — a Chat is only
+        visible once it has a real inbound Message, matching every real
+        conversation in this system (always citizen-initiated). Every
+        existing call site here models an already-ongoing conversation,
+        so a qualifying inbound Message is attached by default; pass
+        `with_inbound_message=False` for the one deliberate case that
+        tests the opposite (a Chat with none)."""
         kwargs.setdefault('session', self.session)
         kwargs.setdefault('office', self.office)
-        return Chat.objects.create(**kwargs)
+        chat = Chat.objects.create(**kwargs)
+        if with_inbound_message:
+            Message.objects.create(
+                session=chat.session, chat=chat, provider_message_id=f'{chat.provider_chat_id}-seed-inbound',
+                direction=Message.DIRECTION_INBOUND, timestamp=timezone.now(),
+            )
+        return chat
 
 
 class ChatListViewTests(ChatsApiTestCase):

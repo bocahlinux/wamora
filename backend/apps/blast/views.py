@@ -15,6 +15,7 @@ arbitrary status writes, client input is never trusted implicitly).
 
 import logging
 
+from django.db import models
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
@@ -27,15 +28,16 @@ from apps.authn.permissions import HasBlastScope, HasOfficeAdminAccess, HasSyste
 from apps.offices.authorization import has_global_access
 from apps.offices.models import Office
 
-from .authorization import campaigns_visible_to, can_view_campaign
+from .authorization import campaigns_visible_to, can_view_campaign, templates_visible_to
 from .limits import remaining_daily_budget
-from .models import BlastCampaign, BlastRecipient
+from .models import BlastApiKey, BlastCampaign, BlastRecipient, BlastSettings, BlastTemplate, get_blast_settings
 from .serializers import (
     BlastCampaignCreateSerializer,
     BlastCampaignDetailSerializer,
     BlastCampaignListSerializer,
     BlastCampaignRejectSerializer,
     BlastRecipientResolveSerializer,
+    BlastTemplateSerializer,
     OfficeChoiceSerializer,
 )
 from .tasks import _maybe_finalize_campaign, schedule_blast_campaign_task
@@ -43,9 +45,52 @@ from .tasks import _maybe_finalize_campaign, schedule_blast_campaign_task
 logger = logging.getLogger(__name__)
 
 
-def _error(request, http_status, code, message):
+def _error(request, http_status, code, message, details=None):
     request_id = getattr(request, 'request_id', None)
-    return Response({'error': {'code': code, 'message': message, 'request_id': request_id}}, status=http_status)
+    body = {'error': {'code': code, 'message': message, 'request_id': request_id}}
+    if details is not None:
+        body['error']['details'] = details
+    return Response(body, status=http_status)
+
+
+def _serializer_error_response(request, serializer):
+    """`serializer.is_valid(raise_exception=True)` would hand the error
+    dict to `apps.core.exceptions.api_exception_handler`, which only ever
+    reads `detail.get('detail')` — for a dict-shaped ValidationError like
+    `BlastCampaignCreateSerializer.validate()`'s own
+    `{'recipients': ..., 'details': [...]}` (the all-or-nothing per-row
+    variable-mismatch report), that key doesn't exist, so `message` comes
+    back `None` and the entire `details` array is silently dropped —
+    found by tracing the response shape end-to-end while wiring up the
+    frontend, not by inspection alone. Rather than changing that GLOBAL
+    handler (used by every endpoint in this project, well beyond Blast's
+    own scope), this builds the error response by hand for this one
+    endpoint, preserving `details` for the frontend's per-row error UI."""
+    errors = serializer.errors
+    raw_details = errors.get('details')
+    # DRF wraps every leaf value of a raised dict-shaped ValidationError in
+    # `ErrorDetail` (a str subclass) via `_get_error_details` — including
+    # `index`, which `validate()` set as a plain int. Left alone, the
+    # wire response would return `"index": "1"` (a JSON string) from
+    # THIS endpoint but `"index": 1` (a JSON int) from the external API's
+    # hand-built error response (external_views.py, which never raises
+    # through DRF's ValidationError machinery) — found by comparing the
+    # two endpoints' actual JSON output. Normalized back to int/str here
+    # so both API surfaces hand the frontend the exact same shape.
+    details = None
+    if raw_details is not None:
+        details = [
+            {
+                'index': int(row['index']),
+                'destination': str(row['destination']),
+                'missing': [str(v) for v in row['missing']],
+                'extra': [str(v) for v in row['extra']],
+            }
+            for row in raw_details
+        ]
+    parts = [str(item) for key, value in errors.items() if key != 'details' for item in (value if isinstance(value, list) else [value])]
+    message = ' '.join(parts) if parts else 'The request could not be processed.'
+    return _error(request, 400, 'validation_error', message, details=details)
 
 
 class BlastCampaignListCreateView(APIView):
@@ -71,13 +116,14 @@ class BlastCampaignListCreateView(APIView):
         # Step 4 (Office integration) — campaigns_visible_to() is the
         # single Office-boundary rule; see apps.blast.authorization.
         campaigns = campaigns_visible_to(request.user).select_related(
-            'session', 'office', 'created_by', 'approved_by'
+            'session', 'office', 'created_by', 'approved_by', 'template'
         ).order_by('-created_at')
         return Response(BlastCampaignListSerializer(campaigns, many=True).data)
 
     def post(self, request):
         serializer = BlastCampaignCreateSerializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            return _serializer_error_response(request, serializer)
         campaign = serializer.save()
 
         AuditLog.objects.create(
@@ -99,9 +145,9 @@ class BlastCampaignDetailView(APIView):
 
     def get(self, request, pk):
         campaign = get_object_or_404(
-            BlastCampaign.objects.select_related('session', 'office', 'created_by', 'approved_by').prefetch_related(
-                'recipients'
-            ),
+            BlastCampaign.objects.select_related(
+                'session', 'office', 'created_by', 'approved_by', 'template'
+            ).prefetch_related('recipients'),
             pk=pk,
         )
         # Step 4 (Office integration) — same rule as the list view above.
@@ -378,3 +424,297 @@ class BlastRecipientResolveView(APIView):
 
         campaign.refresh_from_db()
         return Response(BlastCampaignDetailSerializer(campaign).data)
+
+
+class BlastTemplateListCreateView(APIView):
+    """GET/POST /api/blast/templates/ — Discussed requirement:
+    Superadmin/Global-Admin-only (`has_global_access`), same gating
+    precedent as `BlastApiKeyListCreateView`/`BlastSettingsView` below.
+    An Office Admin/Operator never sees or manages templates at all
+    (previously readable via 'blast'/'system administration' — narrowed
+    deliberately, a real access-control change, not an oversight fix).
+
+    A globally-accessing creator may set `office` explicitly (including
+    `null` for a shared/global template) — `templates_visible_to`'s own
+    office-boundary logic is now moot in practice (every caller who
+    reaches this view already has global access, so that helper's
+    `has_global_access` branch — return everything — is the only branch
+    that ever runs here), but is still reused rather than duplicated."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may manage templates.')
+        templates = templates_visible_to(request.user).select_related('office', 'created_by').order_by('name')
+        return Response(BlastTemplateSerializer(templates, many=True).data)
+
+    def post(self, request):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may manage templates.')
+
+        serializer = BlastTemplateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        template = serializer.save(created_by=request.user)
+
+        AuditLog.objects.create(
+            actor=request.user,
+            action='blast.template.create',
+            target=f'{template.name} ({template.key})',
+            result=AuditLog.RESULT_SUCCESS,
+        )
+        return Response(BlastTemplateSerializer(template).data, status=201)
+
+
+class BlastTemplateDetailView(APIView):
+    """GET/PATCH /api/blast/templates/<pk>/ — same Superadmin/Global-
+    Admin-only gate as the list/create view above. No DELETE — a
+    template is retired via `is_active=False` (same "revoke, never
+    hard-delete" convention as `BlastApiKey`), so a
+    `BlastCampaign.template` pointer to it never dangles and stays fully
+    auditable."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may manage templates.')
+        template = get_object_or_404(BlastTemplate.objects.select_related('office', 'created_by'), pk=pk)
+        return Response(BlastTemplateSerializer(template).data)
+
+    def patch(self, request, pk):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may manage templates.')
+        template = get_object_or_404(BlastTemplate, pk=pk)
+
+        serializer = BlastTemplateSerializer(template, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        # `key` is stable-by-design (BlastTemplate's own docstring) —
+        # never editable after creation, regardless of what the client
+        # sends; every other field may change freely.
+        serializer.validated_data.pop('key', None)
+        template = serializer.save()
+
+        AuditLog.objects.create(
+            actor=request.user,
+            action='blast.template.update',
+            target=f'{template.name} ({template.key})',
+            result=AuditLog.RESULT_SUCCESS,
+        )
+        return Response(BlastTemplateSerializer(template).data)
+
+
+class BlastApiKeyListCreateView(APIView):
+    """GET/POST /api/blast/api-keys/ — Superadmin/Global-Admin-only
+    (mirrors the Roles tab's superuser/global-admin-only precedent,
+    `apps.offices.views`'s Role views). The raw key is only ever present
+    in the POST response, exactly once.
+
+    Discussed requirement — a key is global: it carries no Office at all
+    (see `BlastApiKey`'s own docstring) — it works for a single ad-hoc
+    message, a freeform blast, or a templated blast, against any session
+    named in each individual external request."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may manage API keys.')
+        keys = BlastApiKey.objects.select_related('created_by').order_by('-created_at')
+        return Response([
+            {
+                'id': key.pk,
+                'name': key.name,
+                'key_prefix': key.key_prefix,
+                'is_active': key.is_active,
+                'created_by': key.created_by.username,
+                'last_used_at': key.last_used_at,
+                'created_at': key.created_at,
+            }
+            for key in keys
+        ])
+
+    def post(self, request):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may manage API keys.')
+
+        name = (request.data.get('name') or '').strip()
+        if not name:
+            return _error(request, 400, 'validation_error', 'name must not be blank.')
+
+        key, raw_key = BlastApiKey.create_with_raw_key(name=name, created_by=request.user)
+
+        AuditLog.objects.create(
+            actor=request.user,
+            action='blast.api_key.create',
+            target=f'{key.name} ({key.key_prefix}…)',
+            result=AuditLog.RESULT_SUCCESS,
+        )
+        return Response(
+            {
+                'id': key.pk,
+                'name': key.name,
+                'key_prefix': key.key_prefix,
+                'is_active': key.is_active,
+                'raw_key': raw_key,
+            },
+            status=201,
+        )
+
+
+class BlastApiKeyRevokeView(APIView):
+    """POST /api/blast/api-keys/<pk>/revoke/ — is_active=False, never a
+    hard delete (past campaigns stay attributable)."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may manage API keys.')
+
+        key = get_object_or_404(BlastApiKey, pk=pk)
+        BlastApiKey.objects.filter(pk=key.pk).update(is_active=False, updated_at=timezone.now())
+
+        AuditLog.objects.create(
+            actor=request.user,
+            action='blast.api_key.revoke',
+            target=f'{key.name} ({key.key_prefix}…)',
+            result=AuditLog.RESULT_SUCCESS,
+        )
+        return Response(status=204)
+
+
+class BlastSettingsView(APIView):
+    """GET/PATCH /api/blast/settings/ — the one-row `BlastSettings`
+    singleton (currently just `inter_message_delay_seconds`).
+    Superadmin/Global-Admin-only, same reasoning as API Keys — this is a
+    system-wide value, not an Office-scoped one."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may view Blast settings.')
+        settings_row = get_blast_settings()
+        return Response({'inter_message_delay_seconds': settings_row.inter_message_delay_seconds})
+
+    def patch(self, request):
+        if not has_global_access(request.user):
+            return _error(request, 403, 'forbidden', 'Only a Superadmin or Global Admin may edit Blast settings.')
+
+        delay = request.data.get('inter_message_delay_seconds')
+        try:
+            delay = int(delay)
+        except (TypeError, ValueError):
+            return _error(request, 400, 'validation_error', 'inter_message_delay_seconds must be an integer.')
+        if delay < 0:
+            return _error(request, 400, 'validation_error', 'inter_message_delay_seconds must not be negative.')
+
+        settings_row = get_blast_settings()
+        BlastSettings.objects.filter(pk=settings_row.pk).update(
+            inter_message_delay_seconds=delay, updated_at=timezone.now()
+        )
+
+        AuditLog.objects.create(
+            actor=request.user,
+            action='blast.settings.update',
+            target=f'inter_message_delay_seconds={delay}',
+            result=AuditLog.RESULT_SUCCESS,
+        )
+        return Response({'inter_message_delay_seconds': delay})
+
+
+class BlastHistoryView(APIView):
+    """GET /api/blast/history/ — flattened `BlastRecipient` across every
+    campaign the user may see (reuses `campaigns_visible_to` as the
+    Office boundary, filtered onto recipients via `campaign__in`), the
+    server-side-paginated, filterable audit table the Inbox never shows
+    (Discussed requirement — blast never creates a visible Inbox
+    conversation; this table is where it's actually visible instead).
+
+    Query params: `search` (destination or campaign name, icontains),
+    `status`, `office` (Superadmin/Global Admin only — ignored
+    otherwise, since a scoped user is already limited to their own
+    Office by `campaigns_visible_to`), `template` (template id),
+    `source` (`dashboard` or `api`), `date_from`/`date_to` (ISO dates,
+    inclusive, filtered on `created_at`), `page`/`page_size`."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, (HasBlastScope | HasSystemAdministrationScope)]
+
+    def get(self, request):
+        from django.core.paginator import Paginator
+
+        recipients = BlastRecipient.objects.filter(campaign__in=campaigns_visible_to(request.user)).select_related(
+            'campaign', 'campaign__office', 'campaign__template', 'campaign__triggered_by_api_key'
+        ).order_by('-created_at')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            recipients = recipients.filter(
+                models.Q(destination__icontains=search) | models.Q(campaign__name__icontains=search)
+            )
+
+        status_filter = request.query_params.get('status', '').strip()
+        if status_filter:
+            recipients = recipients.filter(status=status_filter)
+
+        if has_global_access(request.user):
+            office_id = request.query_params.get('office', '').strip()
+            if office_id:
+                recipients = recipients.filter(campaign__office_id=office_id)
+
+        template_id = request.query_params.get('template', '').strip()
+        if template_id:
+            recipients = recipients.filter(campaign__template_id=template_id)
+
+        source = request.query_params.get('source', '').strip()
+        if source == 'api':
+            recipients = recipients.filter(campaign__triggered_by_api_key__isnull=False)
+        elif source == 'dashboard':
+            recipients = recipients.filter(campaign__triggered_by_api_key__isnull=True)
+
+        date_from = request.query_params.get('date_from', '').strip()
+        if date_from:
+            recipients = recipients.filter(created_at__date__gte=date_from)
+        date_to = request.query_params.get('date_to', '').strip()
+        if date_to:
+            recipients = recipients.filter(created_at__date__lte=date_to)
+
+        page_size = min(int(request.query_params.get('page_size', 25) or 25), 100)
+        paginator = Paginator(recipients, page_size)
+        page_number = request.query_params.get('page', 1)
+        page = paginator.get_page(page_number)
+
+        results = [
+            {
+                'id': r.pk,
+                'destination': r.destination,
+                'status': r.status,
+                'failure_reason': r.failure_reason,
+                'variables': r.variables,
+                'sent_at': r.sent_at,
+                'created_at': r.created_at,
+                'campaign': {
+                    'id': r.campaign_id,
+                    'name': r.campaign.name,
+                    'office': {'id': r.campaign.office_id, 'name': r.campaign.office.name}
+                    if r.campaign.office_id else None,
+                    'template': {'id': r.campaign.template_id, 'name': r.campaign.template.name}
+                    if r.campaign.template_id else None,
+                    'source': 'api' if r.campaign.triggered_by_api_key_id else 'dashboard',
+                },
+            }
+            for r in page.object_list
+        ]
+        return Response({
+            'count': paginator.count,
+            'num_pages': paginator.num_pages,
+            'page': page.number,
+            'results': results,
+        })

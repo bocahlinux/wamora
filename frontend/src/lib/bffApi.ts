@@ -117,3 +117,25 @@ export function sendMessage(session: string, chatId: string, text: string, idemp
     headers: { ...authHeader(), 'Idempotency-Key': idempotencyKey },
   });
 }
+
+// Discussed requirement — Inbox composer typing indicator. Same
+// `sending`-scope boundary as `sendMessage` above; fire-and-forget (no
+// idempotency key, nothing to deduplicate — see
+// `bff/src/routes/messages.ts`'s own comment on these two routes).
+export interface TypingIndicatorResult {
+  ok: boolean;
+}
+
+export function startTyping(session: string, chatId: string) {
+  return request<TypingIndicatorResult>(
+    `${config.bffBaseUrl}/api/sessions/${encodeURIComponent(session)}/typing/start`,
+    { method: 'POST', body: { chatId }, headers: authHeader() },
+  );
+}
+
+export function stopTyping(session: string, chatId: string) {
+  return request<TypingIndicatorResult>(
+    `${config.bffBaseUrl}/api/sessions/${encodeURIComponent(session)}/typing/stop`,
+    { method: 'POST', body: { chatId }, headers: authHeader() },
+  );
+}

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Building2, Plus } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Building2, Plus, Search, X } from 'lucide-react';
 
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -19,6 +19,24 @@ import './SettingsPage.css';
 // this file only needs to worry about Superadmin/Global Admin UX.
 export function SettingsOfficesPanel({ offices, refetch }: { offices: ReturnType<typeof useApiQuery<Office[]>>; refetch: () => void }) {
   const [modalOffice, setModalOffice] = useState<Office | 'new' | null>(null);
+  // Offices is never server-side paginated (see getOffices' own comment —
+  // it's a full-list dropdown source elsewhere), so search/status filter
+  // here are plain client-side — the FULL list is already in memory.
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'' | 'active' | 'inactive'>('');
+
+  const filtered = useMemo(() => {
+    if (offices.status !== 'success') return [];
+    const term = search.trim().toLowerCase();
+    return offices.data.filter((office) => {
+      if (term && !office.name.toLowerCase().includes(term)) return false;
+      if (statusFilter === 'active' && !office.is_active) return false;
+      if (statusFilter === 'inactive' && office.is_active) return false;
+      return true;
+    });
+  }, [offices, search, statusFilter]);
+
+  const hasActiveFilters = search !== '' || statusFilter !== '';
 
   return (
     <Card>
@@ -30,15 +48,54 @@ export function SettingsOfficesPanel({ offices, refetch }: { offices: ReturnType
         </Button>
       </div>
 
+      {offices.status === 'success' && offices.data.length > 0 ? (
+        <div className="wa-settings-toolbar">
+          <label className="wa-settings-search">
+            <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+            <input
+              type="text"
+              placeholder="Search Offices…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search Offices"
+            />
+          </label>
+          <select
+            className="wa-settings-toolbar__select"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as '' | 'active' | 'inactive')}
+            aria-label="Filter by status"
+          >
+            <option value="">All statuses</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+          {hasActiveFilters ? (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setSearch('');
+                setStatusFilter('');
+              }}
+            >
+              <X size={14} strokeWidth={1.75} aria-hidden="true" />
+              Clear
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
       {offices.status === 'loading' ? (
         <LoadingState label="Loading offices…" />
       ) : offices.status === 'error' ? (
         <ErrorState error={offices.error} onRetry={offices.refetch} />
       ) : offices.data.length === 0 ? (
         <EmptyState icon={Building2} title="No offices yet" description="Create the first Office to start assigning users to it." />
+      ) : filtered.length === 0 ? (
+        <EmptyState icon={Search} title="No matching Offices" description="Try a different search term or clear the filters." />
       ) : (
         <div className="wa-settings-table-wrap">
-          <table className="wa-settings-table">
+          <table className="wa-settings-table wa-settings-table--responsive">
             <thead>
               <tr>
                 <th>Name</th>
@@ -48,14 +105,14 @@ export function SettingsOfficesPanel({ offices, refetch }: { offices: ReturnType
               </tr>
             </thead>
             <tbody>
-              {offices.data.map((office) => (
+              {filtered.map((office) => (
                 <tr key={office.id}>
-                  <td>{office.name}</td>
-                  <td>
+                  <td data-label="Name">{office.name}</td>
+                  <td data-label="Status">
                     <Badge tone={office.is_active ? 'success' : 'neutral'}>{office.is_active ? 'Active' : 'Inactive'}</Badge>
                   </td>
-                  <td>{new Date(office.created_at).toLocaleDateString()}</td>
-                  <td>
+                  <td data-label="Created">{new Date(office.created_at).toLocaleDateString()}</td>
+                  <td data-label="">
                     <Button variant="ghost" onClick={() => setModalOffice(office)}>
                       Edit
                     </Button>
